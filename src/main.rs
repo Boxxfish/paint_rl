@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// A gym interface for a painting program.
 /// Vectorized by default.
 struct PaintGym {
