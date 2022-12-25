@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use minifb::{Window, WindowOptions};
+use rand::Rng;
 
 const BRUSH_RADIUS: u32 = 2;
 
@@ -13,6 +14,66 @@ struct PaintGym {
     /// All canvases, in one contiguous array.
     canvases: Vec<(u8, u8, u8)>,
     window: Window,
+}
+
+fn plot_line_low(
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    canvases: &mut [(u8, u8, u8)],
+    canvas_offset: usize,
+    canvas_size: u32,
+) {
+    let dx = x1 - x0;
+    let mut dy = y1 - y0;
+    let mut y = y0;
+    let mut yi = 1;
+    if dy < 0 {
+        yi = -1;
+        dy = -dy;
+    }
+    let mut d = 2 * dy - dx;
+
+    for x in x0..x1 {
+        canvases[canvas_offset + y as usize * canvas_size as usize + x as usize] = (0, 0, 0);
+        if d > 0 {
+            y += yi;
+            d += 2 * (dy - dx);
+        } else {
+            d += 2 * dy;
+        }
+    }
+}
+
+fn plot_line_high(
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    canvases: &mut [(u8, u8, u8)],
+    canvas_offset: usize,
+    canvas_size: u32,
+) {
+    let mut dx = x1 - x0;
+    let dy = y1 - y0;
+    let mut x = x0;
+    let mut xi = 1;
+    if dx < 0 {
+        xi = -1;
+        dx = -dx;
+    }
+    let mut d = 2 * dx - dy;
+
+    for y in y0..y1 {
+        canvases[canvas_offset + y as usize * canvas_size as usize + x as usize] = (0, 0, 0);
+        if d > 0 {
+            x += xi;
+            d += 2 * (dx - dy);
+        } else {
+            d += 2 * dx;
+        }
+    }
 }
 
 impl PaintGym {
@@ -42,7 +103,7 @@ impl PaintGym {
             },
         )
         .unwrap_or_else(|e| panic!("{e}"));
-        window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
+        window.limit_update_rate(Some(std::time::Duration::from_millis(16)));
         Self {
             num_envs,
             canvas_size,
@@ -60,23 +121,74 @@ impl PaintGym {
         for (env_id, action) in actions.iter().enumerate() {
             let canvas_offset = env_id * (self.canvas_size * self.canvas_size) as usize;
 
-            // Draw line
-            let dx = action.end.x as i32 - action.start.x as i32;
-            let dy = action.end.y as i32 - action.start.y as i32;
+            // Handle straight lines
+            if action.start.x == action.end.x {
+                let start_y = action.start.y.min(action.end.y);
+                let end_y = action.start.y.max(action.end.y);
+                for y in start_y..end_y {
+                    self.canvases[canvas_offset
+                        + y as usize * self.canvas_size as usize
+                        + action.start.x as usize] = (0, 0, 0);
+                }
+            } else if action.start.y == action.end.y {
+                let start_x = action.start.x.min(action.end.x);
+                let end_x = action.start.x.max(action.end.x);
+                for x in start_x..end_x {
+                    self.canvases[canvas_offset
+                        + action.start.y as usize * self.canvas_size as usize
+                        + x as usize] = (0, 0, 0);
+                }
+            }
+            // Otherwise, handle sloped lines
+            else {
+                let x0 = action.start.x as i32;
+                let x1 = action.end.x as i32;
+                let y0 = action.start.y as i32;
+                let y1 = action.end.y as i32;
 
-            let (step_x, step_y, steps) = if dx.abs() > dy.abs() {
-                (1.0, dy as f32 / dx as f32, dx.abs())
-            } else {
-                (dx as f32 / dy as f32, 1.0, dy.abs())
-            };
-            let mut start_x = action.start.x as f32;
-            let mut start_y = action.start.y as f32;
-            for _ in 0..steps {
-                self.canvases[canvas_offset
-                    + start_y.floor() as usize * self.canvas_size as usize
-                    + start_x.floor() as usize] = (0, 0, 0);
-                start_x += step_x;
-                start_y += step_y;
+                if (y1 - y0).abs() < (x1 - x0).abs() {
+                    if x0 > x1 {
+                        plot_line_low(
+                            x1,
+                            x0,
+                            y1,
+                            y0,
+                            &mut self.canvases,
+                            canvas_offset,
+                            self.canvas_size,
+                        );
+                    } else {
+                        plot_line_low(
+                            x0,
+                            x1,
+                            y0,
+                            y1,
+                            &mut self.canvases,
+                            canvas_offset,
+                            self.canvas_size,
+                        );
+                    }
+                } else if y0 > y1 {
+                    plot_line_high(
+                        x1,
+                        x0,
+                        y1,
+                        y0,
+                        &mut self.canvases,
+                        canvas_offset,
+                        self.canvas_size,
+                    );
+                } else {
+                    plot_line_high(
+                        x0,
+                        x1,
+                        y0,
+                        y1,
+                        &mut self.canvases,
+                        canvas_offset,
+                        self.canvas_size,
+                    );
+                }
             }
         }
 
@@ -146,15 +258,27 @@ struct PaintStepResult {
 const STEPS_BEFORE_TRAINING: u32 = 200;
 
 fn main() {
-    let mut envs = PaintGym::init(2, 256);
+    let mut envs = PaintGym::init(4, 256);
     for step in 0..1000 {
-        let _results = envs.step(
-            &[PaintAction {
-                start: Pixel::new(10, 4),
-                end: Pixel::new(22, 28),
-            }],
-            true,
-        );
+        // Perform random policy
+        let mut rng = rand::thread_rng();
+        let mut actions = Vec::new();
+        for _ in 0..envs.num_envs {
+            let start = Pixel::new(
+                rng.gen_range(0..envs.canvas_size),
+                rng.gen_range(0..envs.canvas_size),
+            );
+            let end = Pixel::new(
+                rng.gen_range(0..envs.canvas_size),
+                rng.gen_range(0..envs.canvas_size),
+            );
+            actions.push(PaintAction {
+                start,
+                end,
+            });
+        }
+
+        let _results = envs.step(&actions, true);
 
         if (step + 1) % STEPS_BEFORE_TRAINING == 0 {
             envs.do_bg_work();
