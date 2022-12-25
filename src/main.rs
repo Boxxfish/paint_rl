@@ -2,6 +2,8 @@
 
 use minifb::{Window, WindowOptions};
 
+const BRUSH_RADIUS: u32 = 2;
+
 /// A gym interface for a painting program.
 /// Vectorized by default.
 struct PaintGym {
@@ -53,7 +55,32 @@ impl PaintGym {
     /// the actions given. No per-environment `done` flag exists,
     /// since the environment will auto reset itself if it detects some
     /// end criteria.
-    pub fn step(&mut self, _actions: &[PaintAction], render: bool) -> PaintStepResult {
+    pub fn step(&mut self, actions: &[PaintAction], render: bool) -> PaintStepResult {
+        // Render the stroke
+        for (env_id, action) in actions.iter().enumerate() {
+            let canvas_offset = env_id * (self.canvas_size * self.canvas_size) as usize;
+
+            // Draw line
+            let dx = action.end.x as i32 - action.start.x as i32;
+            let dy = action.end.y as i32 - action.start.y as i32;
+
+            let (step_x, step_y, steps) = if dx.abs() > dy.abs() {
+                (1.0, dy as f32 / dx as f32, dx.abs())
+            } else {
+                (dx as f32 / dy as f32, 1.0, dy.abs())
+            };
+            let mut start_x = action.start.x as f32;
+            let mut start_y = action.start.y as f32;
+            for _ in 0..steps {
+                self.canvases[canvas_offset
+                    + start_y.floor() as usize * self.canvas_size as usize
+                    + start_x.floor() as usize] = (0, 0, 0);
+                start_x += step_x;
+                start_y += step_y;
+            }
+        }
+
+        // If we're rendering to the screen, update the window
         if render {
             // Render the first env
             let pixel_buffer: Vec<u32> = self.canvases.as_slice()
@@ -90,8 +117,25 @@ impl PaintGym {
 /// A representation of the canvas.
 struct PaintState {}
 
+/// Represents a pixel on screen.
+/// (0, 0) is the top left.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Pixel {
+    pub x: u32,
+    pub y: u32,
+}
+
+impl Pixel {
+    pub fn new(x: u32, y: u32) -> Self {
+        Self { x, y }
+    }
+}
+
 /// An action that can be performed on the canvas.
-struct PaintAction {}
+struct PaintAction {
+    pub start: Pixel,
+    pub end: Pixel,
+}
 
 /// The result of performing a step.
 struct PaintStepResult {
@@ -102,9 +146,15 @@ struct PaintStepResult {
 const STEPS_BEFORE_TRAINING: u32 = 200;
 
 fn main() {
-    let mut envs = PaintGym::init(1, 32);
+    let mut envs = PaintGym::init(2, 256);
     for step in 0..1000 {
-        let _results = envs.step(&[PaintAction {}], true);
+        let _results = envs.step(
+            &[PaintAction {
+                start: Pixel::new(10, 4),
+                end: Pixel::new(22, 28),
+            }],
+            true,
+        );
 
         if (step + 1) % STEPS_BEFORE_TRAINING == 0 {
             envs.do_bg_work();
