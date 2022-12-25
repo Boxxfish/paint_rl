@@ -272,10 +272,7 @@ fn main() {
                 rng.gen_range(0..envs.canvas_size),
                 rng.gen_range(0..envs.canvas_size),
             );
-            actions.push(PaintAction {
-                start,
-                end,
-            });
+            actions.push(PaintAction { start, end });
         }
 
         let _results = envs.step(&actions, true);
