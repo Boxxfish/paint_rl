@@ -1,19 +1,14 @@
-#![allow(dead_code)]
-
 use minifb::{Window, WindowOptions};
-use rand::Rng;
-
-const BRUSH_RADIUS: u32 = 2;
 
 /// A gym interface for a painting program.
 /// Vectorized by default.
-struct PaintGym {
-    num_envs: u32,
+pub struct PaintGym {
+    pub num_envs: u32,
     /// The width and height of each canvas.
-    canvas_size: u32,
+    pub canvas_size: u32,
     /// All canvases, in one contiguous array.
     canvases: Vec<(u8, u8, u8)>,
-    window: Window,
+    window: Option<Window>,
 }
 
 fn plot_line_low(
@@ -79,31 +74,36 @@ fn plot_line_high(
 impl PaintGym {
     /// Loads all environments and data.
     /// This may take a while, at least a couple seconds.
-    pub fn init(num_envs: u32, canvas_size: u32) -> Self {
+    pub fn init(num_envs: u32, canvas_size: u32, render: bool) -> Self {
         let canvases = (0..(canvas_size * canvas_size * num_envs))
             .map(|_| (255, 255, 255))
             .collect();
-        let scale = match canvas_size {
-            0 => panic!("Cannot use a canvas size of 0!"),
-            1..=8 => minifb::Scale::X32,
-            9..=16 => minifb::Scale::X16,
-            17..=32 => minifb::Scale::X8,
-            33..=64 => minifb::Scale::X4,
-            65..=128 => minifb::Scale::X2,
-            _ => minifb::Scale::X1,
+        let window = if render {
+            let scale = match canvas_size {
+                0 => panic!("Cannot use a canvas size of 0!"),
+                1..=8 => minifb::Scale::X32,
+                9..=16 => minifb::Scale::X16,
+                17..=32 => minifb::Scale::X8,
+                33..=64 => minifb::Scale::X4,
+                65..=128 => minifb::Scale::X2,
+                _ => minifb::Scale::X1,
+            };
+            let mut window = Window::new(
+                "PaintGym",
+                canvas_size as usize,
+                canvas_size as usize,
+                WindowOptions {
+                    resize: false,
+                    scale,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+            window.limit_update_rate(Some(std::time::Duration::from_millis(16)));
+            Some(window)
+        } else {
+            None
         };
-        let mut window = Window::new(
-            "PaintGym",
-            canvas_size as usize,
-            canvas_size as usize,
-            WindowOptions {
-                resize: false,
-                scale,
-                ..Default::default()
-            },
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-        window.limit_update_rate(Some(std::time::Duration::from_millis(16)));
         Self {
             num_envs,
             canvas_size,
@@ -193,20 +193,22 @@ impl PaintGym {
         }
 
         // If we're rendering to the screen, update the window
-        if render {
-            // Render the first env
-            let pixel_buffer: Vec<u32> = self.canvases.as_slice()
-                [..(self.canvas_size * self.canvas_size) as usize]
-                .iter()
-                .map(|(r, g, b)| ((*r as u32) << 16) + ((*g as u32) << 8) + (*b as u32))
-                .collect();
-            self.window
-                .update_with_buffer(
-                    &pixel_buffer,
-                    self.canvas_size as usize,
-                    self.canvas_size as usize,
-                )
-                .unwrap();
+        if let Some(window) = &mut self.window {
+            if render {
+                // Render the first env
+                let pixel_buffer: Vec<u32> = self.canvases.as_slice()
+                    [..(self.canvas_size * self.canvas_size) as usize]
+                    .iter()
+                    .map(|(r, g, b)| ((*r as u32) << 16) + ((*g as u32) << 8) + (*b as u32))
+                    .collect();
+                window
+                    .update_with_buffer(
+                        &pixel_buffer,
+                        self.canvas_size as usize,
+                        self.canvas_size as usize,
+                    )
+                    .unwrap();
+            }
         }
 
         PaintStepResult {
@@ -217,22 +219,21 @@ impl PaintGym {
     }
 
     /// Performs some work as the agent is trained.
-    /// Since this may potentially take a long time, this function
-    /// ensures that period doesn't go to waste by doing things like
-    /// perform IO bound operations.
+    /// Since this may take a long time, this function ensures that period
+    /// doesn't go to waste by doing things like IO bound operations.
     pub fn do_bg_work(&mut self) {}
 
-    /// Performs cleanup work.
+    /// Performs cleanup.
     pub fn cleanup(&mut self) {}
 }
 
 /// A representation of the canvas.
-struct PaintState {}
+pub struct PaintState {}
 
 /// Represents a pixel on screen.
 /// (0, 0) is the top left.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-struct Pixel {
+pub struct Pixel {
     pub x: u32,
     pub y: u32,
 }
@@ -244,43 +245,13 @@ impl Pixel {
 }
 
 /// An action that can be performed on the canvas.
-struct PaintAction {
+pub struct PaintAction {
     pub start: Pixel,
     pub end: Pixel,
 }
 
 /// The result of performing a step.
-struct PaintStepResult {
+pub struct PaintStepResult {
     /// (Previous state, current state, reward)
     pub results: Vec<(PaintState, PaintState, f32)>,
-}
-
-const STEPS_BEFORE_TRAINING: u32 = 200;
-
-fn main() {
-    let mut envs = PaintGym::init(4, 256);
-    for step in 0..1000 {
-        // Perform random policy
-        let mut rng = rand::thread_rng();
-        let mut actions = Vec::new();
-        for _ in 0..envs.num_envs {
-            let start = Pixel::new(
-                rng.gen_range(0..envs.canvas_size),
-                rng.gen_range(0..envs.canvas_size),
-            );
-            let end = Pixel::new(
-                rng.gen_range(0..envs.canvas_size),
-                rng.gen_range(0..envs.canvas_size),
-            );
-            actions.push(PaintAction { start, end });
-        }
-
-        let _results = envs.step(&actions, true);
-
-        if (step + 1) % STEPS_BEFORE_TRAINING == 0 {
-            envs.do_bg_work();
-        }
-    }
-
-    envs.cleanup();
 }
