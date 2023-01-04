@@ -1,19 +1,39 @@
 use indicatif::ProgressIterator;
 use paint_gym::gym::{PaintAction, PaintGym, Pixel};
+use paint_gym::model_utils::{load_model, prep_py};
 use plotters::prelude::*;
+
+use pyo3::prelude::*;
 use rand::Rng;
+use tch::nn::{OptimizerConfig, VarStore};
 
 ///
 /// A setup for training an agent to copy strokes from an image.
 ///
 
 const STEPS: u32 = 10000;
-const STEPS_BEFORE_TRAINING: u32 = 200;
+const STEPS_BEFORE_TRAINING: u32 = 10;
 const EVAL_STEPS: u32 = 100;
 const EVAL_RUNS: u32 = 4;
 const STEPS_BEFORE_EVAL: u32 = STEPS_BEFORE_TRAINING;
 const STEPS_BEFORE_PLOTTING: u32 = STEPS_BEFORE_EVAL * 10;
-const AVG_REWARD_OUTPUT: &str = "avg_rewards.png";
+const AVG_REWARD_OUTPUT: &str = "temp/avg_rewards.png";
+
+#[pyclass]
+struct QNetParams {
+    #[pyo3(get)]
+    state_dim: u32,
+    #[pyo3(get)]
+    action_dim: u32,
+}
+
+#[pyclass]
+struct PNetParams {
+    #[pyo3(get)]
+    state_dim: u32,
+    #[pyo3(get)]
+    action_dim: u32,
+}
 
 fn main() {
     // Plotting stuff
@@ -23,6 +43,40 @@ fn main() {
     }
     let root = BitMapBackend::new(AVG_REWARD_OUTPUT, (640, 480)).into_drawing_area();
     let mut avg_rewards = Vec::with_capacity((STEPS / STEPS_BEFORE_PLOTTING) as usize);
+
+    // Load models
+    let vs = VarStore::new(tch::Device::Cpu);
+    pyo3::prepare_freethreaded_python();
+    let (_q_net, _p_net) = Python::with_gil(|py| {
+        prep_py(py);
+        let q_net = load_model(
+            py,
+            &vs,
+            "copy_stroke_ddpg",
+            "QNet",
+            QNetParams {
+                state_dim: 4,
+                action_dim: 1,
+            },
+            &[10, 5],
+        );
+        let p_net = load_model(
+            py,
+            &vs,
+            "copy_stroke_ddpg",
+            "PNet",
+            PNetParams {
+                state_dim: 4,
+                action_dim: 1,
+            },
+            &[10, 1],
+        );
+        (q_net, p_net)
+    });
+    let _q_opt = tch::nn::Adam::default().build(&vs, 0.001).unwrap();
+    let _p_opt = tch::nn::Adam::default().build(&vs, 0.003).unwrap();
+    // let q_target = q_net.clone();
+    // let p_target = p_net.clone();
 
     let mut envs = PaintGym::init(4, 256, false);
     for step in (0..STEPS).progress() {

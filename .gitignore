@@ -1,1 +1,7 @@
 /target
+
+# ML artifacts and config
+*/__pycache__
+/temp
+*.ptc
+*.pt

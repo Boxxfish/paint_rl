@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "paint-rl-models"
+version = "0.1.0"
+description = "Models for use in Paint RL."
+authors = ["Ben Giacalone <bensgiacalone@gmail.com>"]
+readme = "README.md"
+packages = [{include = "models"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+torch = "^1.13.1"
+torchvision = "^0.14.1"
+torchaudio = "^0.13.1"
+rich = "^13.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
