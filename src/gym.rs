@@ -1,7 +1,8 @@
 use minifb::{Window, WindowOptions};
 use rand::Rng;
 
-const DONE_CUTOFF: u32 = 10;
+/// Minimum L1 distance before env is considered done.
+const DONE_CUTOFF: u64 = 10 * u8::MAX as u64;
 
 /// A gym interface for a painting program.
 /// Vectorized by default.
@@ -12,6 +13,12 @@ pub struct PaintGym {
     /// All canvases, in one contiguous array.
     canvases: Vec<(u8, u8, u8)>,
     references: Vec<(u8, u8, u8)>,
+    /// Number of steps performed in each environment.
+    steps: Vec<u32>,
+    /// Reward if the time limit is hit. Should be negative.
+    failure_reward: i32,
+    /// Time limit for each environment.
+    max_steps: u32,
     window: Option<Window>,
 }
 
@@ -134,8 +141,14 @@ fn plot_line_high(
 impl PaintGym {
     /// Loads all environments and data.
     /// This may take a while, at least a couple seconds.
-    pub fn init(num_envs: u32, canvas_size: u32, render: bool) -> Self {
-        let canvases = (0..(canvas_size * canvas_size * num_envs))
+    pub fn init(
+        num_envs: u32,
+        canvas_size: u32,
+        failure_reward: i32,
+        max_steps: u32,
+        render: bool,
+    ) -> (Self, PaintStepResult) {
+        let canvases: Vec<(u8, u8, u8)> = (0..(canvas_size * canvas_size * num_envs))
             .map(|_| (255, 255, 255))
             .collect();
         let window = if render {
@@ -151,10 +164,11 @@ impl PaintGym {
             let mut window = Window::new(
                 "PaintGym",
                 canvas_size as usize,
-                canvas_size as usize,
+                canvas_size as usize * 2,
                 WindowOptions {
                     resize: false,
                     scale,
+                    borderless: true,
                     ..Default::default()
                 },
             )
@@ -165,6 +179,7 @@ impl PaintGym {
             None
         };
 
+        // Generate references
         let mut rng = rand::thread_rng();
         let mut references: Vec<(u8, u8, u8)> = (0..(canvas_size * canvas_size * num_envs))
             .map(|_| (255, 255, 255))
@@ -175,13 +190,38 @@ impl PaintGym {
             draw_reference(&mut rng, &mut references, canvas_offset, canvas_size);
         }
 
-        Self {
-            num_envs,
-            canvas_size,
-            canvases,
-            references,
-            window,
+        // Generate first step observations
+        let mut results = Vec::new();
+        for env_id in 0..(num_envs as usize) {
+            let canvas_offset = env_id * (canvas_size * canvas_size) as usize;
+            results.push((
+                PaintState {
+                    canvas: canvases
+                        [canvas_offset..(canvas_offset + (canvas_size * canvas_size) as usize)]
+                        .to_vec(),
+                    reference: references
+                        [canvas_offset..(canvas_offset + (canvas_size * canvas_size) as usize)]
+                        .to_vec(),
+                },
+                0.0,
+                false,
+            ))
         }
+        let result = PaintStepResult { results };
+
+        (
+            Self {
+                num_envs,
+                canvas_size,
+                canvases,
+                references,
+                window,
+                steps: vec![0; num_envs as usize],
+                failure_reward,
+                max_steps,
+            },
+            result,
+        )
     }
 
     /// Performs one step through all environments and performs
@@ -208,45 +248,85 @@ impl PaintGym {
         if let Some(window) = &mut self.window {
             if render {
                 // Render the first env
-                let pixel_buffer: Vec<u32> = self.canvases.as_slice()
+                let mut pixel_buffer: Vec<u32> = self.canvases.as_slice()
                     [..(self.canvas_size * self.canvas_size) as usize]
                     .iter()
                     .map(|(r, g, b)| ((*r as u32) << 16) + ((*g as u32) << 8) + (*b as u32))
                     .collect();
+                let ref_pixel_buffer: Vec<u32> = self.references.as_slice()
+                    [..(self.canvas_size * self.canvas_size) as usize]
+                    .iter()
+                    .map(|(r, g, b)| ((*r as u32) << 16) + ((*g as u32) << 8) + (*b as u32))
+                    .collect();
+                pixel_buffer.extend(ref_pixel_buffer.iter());
                 window
                     .update_with_buffer(
                         &pixel_buffer,
                         self.canvas_size as usize,
-                        self.canvas_size as usize,
+                        self.canvas_size as usize * 2,
                     )
                     .unwrap();
             }
         }
 
-        // Compute the l2 squared distance between the environment images and the reference images.
-        // We store the l2 squared distances, but return a reward of the l2 distances.
-        // This way, we can use the l2 distances as a distance metric efficiently, while keeping the
-        // reward fairly small.
+        // Compute the L1 distance between the environment images and the reference images.
+        // We divide by the maximum L1 distance to keep the reward from -1 to 0.
         let mut rewards = Vec::with_capacity(self.num_envs as usize);
-        let mut l2s = Vec::with_capacity(self.num_envs as usize);
+        let mut l1s = Vec::with_capacity(self.num_envs as usize);
+        let r_divisor = (self.canvas_size * self.canvas_size * 3 * u8::MAX as u32) as f32;
         for env_id in 0..(self.num_envs as usize) {
             let canvas_offset = env_id * (self.canvas_size * self.canvas_size) as usize;
-            let mut l2 = 0;
+            let mut l1 = 0;
             for i in 0..(self.canvas_size * self.canvas_size) as usize {
                 let canvas_pix = self.canvases[canvas_offset + i];
                 let ref_pix = self.references[canvas_offset + i];
-                l2 += (canvas_pix.0 as i32 - ref_pix.0 as i32).pow(2) as u32
-                    + (canvas_pix.1 as i32 - ref_pix.1 as i32).pow(2) as u32
-                    + (canvas_pix.2 as i32 - ref_pix.2 as i32).pow(2) as u32;
+                l1 += canvas_pix.0.abs_diff(ref_pix.0) as u64
+                    + canvas_pix.1.abs_diff(ref_pix.1) as u64
+                    + canvas_pix.2.abs_diff(ref_pix.2) as u64;
             }
-            rewards.push(-(l2 as f32).sqrt());
-            l2s.push(l2);
+            rewards.push(-(l1 as f32) / r_divisor);
+            l1s.push(l1);
         }
 
-        // If any environments have a lower l2 distance than the cutoff, reset that environment
+        // If any environments have a lower L1 distance than the cutoff, mark as done
+        let mut dones = vec![false; self.num_envs as usize];
+        for (env_id, &l1) in l1s.iter().enumerate() {
+            if l1 < DONE_CUTOFF {
+                dones[env_id] = true;
+            }
+        }
+
+        // If any environments hit the time limit, mark as done and apply penalty
+        for env_id in 0..(self.num_envs as usize) {
+            self.steps[env_id] += 1;
+            if self.steps[env_id] > self.max_steps {
+                dones[env_id] = true;
+                rewards[env_id] += self.failure_reward as f32;
+            }
+        }
+
+        // Obtains results to return
+        let mut results = Vec::new();
+        for env_id in 0..(self.num_envs as usize) {
+            let canvas_offset = env_id * (self.canvas_size * self.canvas_size) as usize;
+            results.push((
+                PaintState {
+                    canvas: self.canvases[canvas_offset
+                        ..(canvas_offset + (self.canvas_size * self.canvas_size) as usize)]
+                        .to_vec(),
+                    reference: self.references[canvas_offset
+                        ..(canvas_offset + (self.canvas_size * self.canvas_size) as usize)]
+                        .to_vec(),
+                },
+                rewards[env_id],
+                dones[env_id],
+            ))
+        }
+
+        // Reset finished environments
         let mut rng = rand::thread_rng();
-        for (env_id, &l2) in l2s.iter().enumerate() {
-            if l2 < DONE_CUTOFF {
+        for (env_id, &done) in dones.iter().enumerate() {
+            if done {
                 let canvas_total = (self.canvas_size * self.canvas_size) as usize;
                 let canvas_offset = env_id * canvas_total;
 
@@ -257,30 +337,43 @@ impl PaintGym {
                 );
 
                 // Regenerate reference
+                self.references.splice(
+                    canvas_offset..(canvas_offset + canvas_total),
+                    std::iter::repeat((255, 255, 255)).take(canvas_total),
+                );
                 draw_reference(
                     &mut rng,
                     &mut self.references,
                     canvas_offset,
                     self.canvas_size,
                 );
+
+                self.steps[env_id] = 0;
             }
         }
 
-        PaintStepResult {
-            results: rewards
-                .iter()
-                .map(|r| (PaintState {}, PaintState {}, *r))
-                .collect(),
-        }
+        PaintStepResult { results }
     }
 
     /// Switches the environments to use eval mode.
     /// During this mode, only a single environment is used.
-    /// When the environment has terminated, `is_done` will be true.
     pub fn eval_mode(&mut self) {
         self.canvases = (0..(self.canvas_size * self.canvas_size * self.num_envs))
             .map(|_| (255, 255, 255))
             .collect();
+
+        let mut rng = rand::thread_rng();
+        let mut references: Vec<(u8, u8, u8)> =
+            (0..(self.canvas_size * self.canvas_size * self.num_envs))
+                .map(|_| (255, 255, 255))
+                .collect();
+
+        for env_id in 0..(self.num_envs as usize) {
+            let canvas_offset = env_id * (self.canvas_size * self.canvas_size) as usize;
+            draw_reference(&mut rng, &mut references, canvas_offset, self.canvas_size);
+        }
+
+        self.steps = vec![0; self.num_envs as usize];
     }
 
     /// Switches the environments to use train mode.
@@ -289,20 +382,19 @@ impl PaintGym {
         self.canvases = (0..(self.canvas_size * self.canvas_size * self.num_envs))
             .map(|_| (255, 255, 255))
             .collect();
-    }
 
-    /// Returns true if the environment is finished.
-    /// Only works during eval mode.
-    pub fn is_done(&self) -> bool {
-        let mut l2 = 0;
-        for i in 0..(self.canvas_size * self.canvas_size) as usize {
-            let canvas_pix = self.canvases[i];
-            let ref_pix = self.references[i];
-            l2 += (canvas_pix.0 as i32 - ref_pix.0 as i32).pow(2) as u32
-                + (canvas_pix.1 as i32 - ref_pix.1 as i32).pow(2) as u32
-                + (canvas_pix.2 as i32 - ref_pix.2 as i32).pow(2) as u32;
+        let mut rng = rand::thread_rng();
+        let mut references: Vec<(u8, u8, u8)> =
+            (0..(self.canvas_size * self.canvas_size * self.num_envs))
+                .map(|_| (255, 255, 255))
+                .collect();
+
+        for env_id in 0..(self.num_envs as usize) {
+            let canvas_offset = env_id * (self.canvas_size * self.canvas_size) as usize;
+            draw_reference(&mut rng, &mut references, canvas_offset, self.canvas_size);
         }
-        l2 < DONE_CUTOFF
+
+        self.steps = vec![0; self.num_envs as usize];
     }
 
     /// Performs some work as the agent is trained.
@@ -315,7 +407,11 @@ impl PaintGym {
 }
 
 /// A representation of the canvas.
-pub struct PaintState {}
+#[derive(Clone)]
+pub struct PaintState {
+    pub canvas: Vec<(u8, u8, u8)>,
+    pub reference: Vec<(u8, u8, u8)>,
+}
 
 /// Represents a pixel on screen.
 /// (0, 0) is the top left.
@@ -332,6 +428,7 @@ impl Pixel {
 }
 
 /// An action that can be performed on the canvas.
+#[derive(Debug)]
 pub struct PaintAction {
     pub start: Pixel,
     pub end: Pixel,
@@ -339,6 +436,6 @@ pub struct PaintAction {
 
 /// The result of performing a step.
 pub struct PaintStepResult {
-    /// (Previous state, current state, reward)
-    pub results: Vec<(PaintState, PaintState, f32)>,
+    /// (current state, reward, done)
+    pub results: Vec<(PaintState, f32, bool)>,
 }

@@ -1,5 +1,24 @@
 use pyo3::prelude::*;
-use tch::nn::VarStore;
+
+/// Stores both trainable model's architecture and its variables.
+pub struct TrainableModel {
+    pub module: tch::TrainableCModule,
+    pub vs: tch::nn::VarStore,
+    pub path: String,
+}
+
+impl TrainableModel {
+    /// Loads a model from a path.
+    pub fn load(path: &str) -> Self {
+        let vs = tch::nn::VarStore::new(tch::Device::Cpu);
+        let module = tch::jit::TrainableCModule::load(path, vs.root()).unwrap();
+        Self {
+            module,
+            vs,
+            path: path.to_string(),
+        }
+    }
+}
 
 /// Prepares an interpreter for usage.
 /// More specifically, it:
@@ -16,6 +35,16 @@ sys.path.append(os.getcwd())
     .unwrap();
 }
 
+/// Cleans up Python.
+/// More specifically, it:
+/// - Reinstates the SIGINT handler
+pub fn cleanup_py() {
+    ctrlc::set_handler(|| {
+        std::process::exit(1);
+    })
+    .unwrap();
+}
+
 /// Prints a stack trace and panics if an exception has occurred.
 pub fn py_unwrap<T>(py: Python, result: Result<T, PyErr>) -> T {
     match result {
@@ -27,15 +56,14 @@ pub fn py_unwrap<T>(py: Python, result: Result<T, PyErr>) -> T {
     }
 }
 
-/// Exports a model from a module and loads it.
-pub fn load_model(
+/// Exports a model from a module.
+pub fn export_model(
     py: Python,
-    vs: &VarStore,
     file_name: &str,
     model_name: &str,
     params: impl IntoPy<PyObject>,
-    input_shape: &[u32],
-) -> tch::TrainableCModule {
+    input_shapes: &[&[u32]],
+) {
     let model_utils = py_unwrap(py, py.import("models.model_utils"));
     py_unwrap(
         py,
@@ -45,9 +73,11 @@ pub fn load_model(
                 file_name,
                 model_name,
                 params.into_py(py),
-                input_shape.to_vec(),
+                input_shapes
+                    .iter()
+                    .map(|x| x.to_vec())
+                    .collect::<Vec<Vec<_>>>(),
             ),
         ),
     );
-    tch::jit::TrainableCModule::load(format!("temp/{model_name}.ptc"), vs.root()).unwrap()
 }

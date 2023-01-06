@@ -8,7 +8,7 @@ const CANVAS_SIZE: u32 = 256;
 const STEPS_BEFORE_TRAINING: u32 = 10;
 
 fn run_copy_stroke(env_count: u32, inf_time_millis: u64, train_time_millis: u64) {
-    let mut envs = PaintGym::init(env_count, CANVAS_SIZE, false);
+    let (mut envs, _) = PaintGym::init(env_count, CANVAS_SIZE, 0, 50, false);
     for step in 0..TOTAL_STEPS {
         let mut rng = rand::thread_rng();
         let mut actions = Vec::new();

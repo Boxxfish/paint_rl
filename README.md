@@ -12,4 +12,8 @@ Second pass (Get agent working on environment):
 [x] Get model exporting working.
 [] Set up model in copy stroke environment for single env.
 [] Upgrade to batch mode.
+[] Add CLI parsing for hyperparameters.
+[] Check if cuda makes a difference in training speed.
+[] Weights and Biases local integration?
+[] Hyperparameter search integration.
 [] Iterate until model gives satisfactory results.

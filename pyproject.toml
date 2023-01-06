@@ -13,6 +13,9 @@ torchvision = "^0.14.1"
 torchaudio = "^0.13.1"
 rich = "^13.0.0"
 
+[tool.poetry.group.dev.dependencies]
+mypy = "^0.991"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
