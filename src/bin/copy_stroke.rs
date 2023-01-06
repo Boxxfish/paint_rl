@@ -16,10 +16,11 @@ use tch::nn::OptimizerConfig;
 //
 
 const STEPS: u32 = 100000;
-const STEPS_BEFORE_TRAINING: u32 = 500;
+const ENV_COUNT: u32 = 16;
+const STEPS_BEFORE_TRAINING: u32 = 500 / ENV_COUNT;
 const STEPS_BEFORE_POLICY: u32 = 1000;
 const MAX_ENV_STEPS: u32 = 50;
-const EVAL_RUNS: u32 = 4;
+const EVAL_RUNS: u32 = 8;
 const TRAIN_ITERATIONS: u32 = 10;
 const TRAIN_BATCH_SIZE: usize = 64;
 const STEPS_BEFORE_EVAL: u32 = STEPS_BEFORE_TRAINING * 10;
@@ -30,6 +31,8 @@ const DISCOUNT: f32 = 0.95;
 const BUFFER_CAPACITY: usize = 1000;
 const FAILURE_REWARD: i32 = -10;
 const EPSILON: f32 = 0.1;
+const RENDERING: bool = false;
+const CONTINUE_TRAINING: bool = false;
 
 // Canvas and reference pixels
 const IMG_SIZE: u32 = 8;
@@ -96,35 +99,47 @@ impl ReplayBuffer {
             .requires_grad_(false),
             actions: tch::Tensor::zeros(&[capacity as i64, ACTION_DIM as i64], (k, d))
                 .requires_grad_(false),
-            rewards: tch::Tensor::zeros(&[capacity as i64, 1], (k, d)).requires_grad_(false),
-            dones: tch::Tensor::zeros(&[capacity as i64, 1], (k, d)).requires_grad_(false),
+            rewards: tch::Tensor::zeros(&[capacity as i64], (k, d)).requires_grad_(false),
+            dones: tch::Tensor::zeros(&[capacity as i64], (k, d)).requires_grad_(false),
             filled: false,
         }
     }
 
-    /// Inserts an element into the buffer.
+    /// Inserts a batch of elements into the buffer.
     /// If the max capacity has been reached, the buffer wraps around.
-    pub fn insert(
+    /// Do not attempt to insert more elements than the buffer's capacity.
+    pub fn insert_batch(
         &mut self,
-        prev_state: &tch::Tensor,
-        state: &tch::Tensor,
-        action: &tch::Tensor,
-        reward: f32,
-        done: bool,
+        prev_states: &tch::Tensor,
+        states: &tch::Tensor,
+        actions: &tch::Tensor,
+        rewards: &[f32],
+        dones: &[bool],
     ) {
-        self.prev_states.get(self.next as _).copy_(prev_state);
-        self.states.get(self.next as _).copy_(state);
-        self.actions.get(self.next as _).copy_(action);
-        self.rewards
-            .get(self.next as _)
-            .copy_(&tch::Tensor::of_slice(&[reward]));
-        self.dones
-            .get(self.next as _)
-            .copy_(&tch::Tensor::of_slice(&[done as u8 as f32]));
-        if self.next == self.capacity - 1 {
+        let batch_size = dones.len();
+        tch::no_grad(|| {
+            let indices = tch::Tensor::arange_start(
+                self.next as i64,
+                (self.next + batch_size) as i64,
+                (tch::Kind::Int64, tch::Device::Cpu),
+            )
+            .remainder(batch_size as i64);
+            self.prev_states = self.prev_states.index_copy(0, &indices, prev_states);
+            self.states = self.states.index_copy(0, &indices, states);
+            self.actions = self.actions.index_copy(0, &indices, actions);
+            self.rewards = self
+                .rewards
+                .index_copy(0, &indices, &tch::Tensor::of_slice(rewards));
+            self.dones = self.dones.index_copy(
+                0,
+                &indices,
+                &tch::Tensor::of_slice(dones).to_dtype(tch::Kind::Float, true, false),
+            );
+        });
+        self.next = (self.next + batch_size) % self.capacity;
+        if self.next == 0 {
             self.filled = true;
         }
-        self.next = (self.next + 1) % self.capacity;
     }
 
     /// Generates a mini batch of experience.
@@ -260,19 +275,30 @@ fn main() -> Result<(), anyhow::Error> {
     });
     cleanup_py();
 
-    let mut q_net = TrainableModel::load("temp/QNet.ptc");
-    let mut p_net = TrainableModel::load("temp/PNet.ptc");
+    let (q_path, p_path) = if CONTINUE_TRAINING {
+        ("temp/QNet.pt", "temp/PNet.pt")
+    } else {
+        ("temp/QNet.ptc", "temp/PNet.ptc")
+    };
+    let mut q_net = TrainableModel::load(q_path);
+    let mut p_net = TrainableModel::load(p_path);
     q_net.module.set_eval();
     p_net.module.set_eval();
-    let mut q_target = TrainableModel::load("temp/QNet.ptc");
-    let mut p_target = TrainableModel::load("temp/PNet.ptc");
+    let mut q_target = TrainableModel::load(q_path);
+    let mut p_target = TrainableModel::load(p_path);
     q_target.module.set_eval();
     p_target.module.set_eval();
     let mut q_opt = tch::nn::Adam::default().build(&q_net.vs, 0.001)?;
     let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, 0.003)?;
 
     let mut rng = rand::thread_rng();
-    let (mut envs, mut results) = PaintGym::init(1, IMG_SIZE, FAILURE_REWARD, MAX_ENV_STEPS, false);
+    let (mut envs, mut results) = PaintGym::init(
+        ENV_COUNT,
+        IMG_SIZE,
+        FAILURE_REWARD,
+        MAX_ENV_STEPS,
+        RENDERING,
+    );
     let mut replay_buffer = ReplayBuffer::new(BUFFER_CAPACITY);
     for step in (0..STEPS).progress() {
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
@@ -307,12 +333,12 @@ fn main() -> Result<(), anyhow::Error> {
 
         let prev_state = results_to_state(&results);
         results = envs.step(&actions, false);
-        replay_buffer.insert(
-            &prev_state.squeeze(),
-            &results_to_state(&results).squeeze(),
-            &actions_tensor.squeeze(),
-            results.results[0].1,
-            results.results[0].2,
+        replay_buffer.insert_batch(
+            &prev_state,
+            &results_to_state(&results),
+            &actions_tensor,
+            &results.results.iter().map(|r| r.1).collect::<Vec<_>>(),
+            &results.results.iter().map(|r| r.2).collect::<Vec<_>>(),
         );
 
         if replay_buffer.is_full() {
