@@ -8,12 +8,12 @@ default:
     just --list
 
 # Run an optimized version of the specified binary.
-@run-rel NAME:
-   RUSTFLAGS="-C target-cpu=native" cargo run --bin {{NAME}} --release
+@run-rel NAME *ARGS:
+   RUSTFLAGS="-C target-cpu=native" cargo run --bin {{NAME}} --release -- {{ARGS}}
 
 # Run a debug version of the specified binary.
-@run NAME:
-   cargo run --bin {{NAME}}
+@run NAME *ARGS:
+   cargo run --bin {{NAME}} -- {{ARGS}}
 
 # Run benchmarks.
 @bench:

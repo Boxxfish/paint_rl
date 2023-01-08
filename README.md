@@ -13,7 +13,7 @@ Second pass (Get agent working on environment):
 [x] Set up model in copy stroke environment for single env.
 [x] Upgrade to batch mode.
 [x] Check if cuda makes a difference in training speed.
-[] Add CLI parsing for hyperparameters.
+[x] Add CLI parsing for hyperparameters and fix environments not reloading correctly.
 [] Add monitor.
 [] Hyperparameter search integration.
 [] Switch to PPO.
