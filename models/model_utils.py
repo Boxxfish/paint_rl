@@ -4,10 +4,11 @@ Utilities for working with PyTorch models within a Rust project.
 import torch
 import importlib
 
-def export_model(file_name: str, model_name: str, params: object, input_shapes: list[list[int]]):
+def export_model(file_name: str, model_name: str, params: object, input_shapes: list[list[int]], cuda: bool = False):
     """
-    Exports a model from a file, using `input_shape` as tracing input.
+    Exports a model from a file, using `input_shape` as input.
     """
+    device = torch.device("cuda" if cuda else "cpu", 0)
     module = importlib.import_module("models." + file_name)
     model = getattr(module, model_name)
     if isinstance(params, dict):
@@ -18,9 +19,13 @@ def export_model(file_name: str, model_name: str, params: object, input_shapes: 
             if "__" not in key:
                 d[key] = getattr(params, key)
         net = model(**d)
-    fake_input = [torch.zeros(input_shape) for input_shape in input_shapes]
+    net.to(device)
+    fake_input = [torch.rand(input_shape, device=device) for input_shape in input_shapes]
 
     # Test model runs with fake input
+    net.eval()
+    net(*fake_input)
+    net.train()
     net(*fake_input)
 
     # Trace model

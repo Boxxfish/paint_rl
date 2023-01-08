@@ -4,7 +4,6 @@ use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
 use plotters::prelude::*;
 
 use pyo3::prelude::*;
-use rand::Rng;
 use tch::nn::OptimizerConfig;
 
 //
@@ -15,14 +14,13 @@ use tch::nn::OptimizerConfig;
 // The difference at each time step is given as the reward.
 //
 
-const STEPS: u32 = 100000;
-const ENV_COUNT: u32 = 16;
+const ENV_COUNT: u32 = 64;
+const STEPS: u32 = 100000 / ENV_COUNT;
 const STEPS_BEFORE_TRAINING: u32 = 500 / ENV_COUNT;
-const STEPS_BEFORE_POLICY: u32 = 1000;
+const STEPS_BEFORE_POLICY: u32 = 1000 / ENV_COUNT;
 const MAX_ENV_STEPS: u32 = 50;
-const EVAL_RUNS: u32 = 8;
 const TRAIN_ITERATIONS: u32 = 10;
-const TRAIN_BATCH_SIZE: usize = 64;
+const TRAIN_BATCH_SIZE: usize = 32;
 const STEPS_BEFORE_EVAL: u32 = STEPS_BEFORE_TRAINING * 10;
 const STEPS_BEFORE_PLOTTING: u32 = STEPS_BEFORE_EVAL;
 const AVG_REWARD_OUTPUT: &str = "temp/avg_rewards.png";
@@ -33,6 +31,7 @@ const FAILURE_REWARD: i32 = -10;
 const EPSILON: f32 = 0.1;
 const RENDERING: bool = false;
 const CONTINUE_TRAINING: bool = false;
+const USE_CUDA: bool = true;
 
 // Canvas and reference pixels
 const IMG_SIZE: u32 = 8;
@@ -67,13 +66,13 @@ struct ReplayBuffer {
     pub capacity: usize,
     pub next: usize,
     pub filled: bool,
+    pub device: tch::Device,
 }
 
 impl ReplayBuffer {
     /// Creates a new instance of a replay buffer.
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize, device: tch::Device) -> Self {
         let k = tch::Kind::Float;
-        let d = tch::Device::Cpu;
         Self {
             capacity,
             next: 0,
@@ -84,7 +83,7 @@ impl ReplayBuffer {
                     IMG_SIZE as i64,
                     IMG_SIZE as i64,
                 ],
-                (k, d),
+                (k, device),
             )
             .requires_grad_(false),
             states: tch::Tensor::zeros(
@@ -94,14 +93,15 @@ impl ReplayBuffer {
                     IMG_SIZE as i64,
                     IMG_SIZE as i64,
                 ],
-                (k, d),
+                (k, device),
             )
             .requires_grad_(false),
-            actions: tch::Tensor::zeros(&[capacity as i64, ACTION_DIM as i64], (k, d))
+            actions: tch::Tensor::zeros(&[capacity as i64, ACTION_DIM as i64], (k, device))
                 .requires_grad_(false),
-            rewards: tch::Tensor::zeros(&[capacity as i64], (k, d)).requires_grad_(false),
-            dones: tch::Tensor::zeros(&[capacity as i64], (k, d)).requires_grad_(false),
+            rewards: tch::Tensor::zeros(&[capacity as i64], (k, device)).requires_grad_(false),
+            dones: tch::Tensor::zeros(&[capacity as i64], (k, device)).requires_grad_(false),
             filled: false,
+            device,
         }
     }
 
@@ -117,23 +117,28 @@ impl ReplayBuffer {
         dones: &[bool],
     ) {
         let batch_size = dones.len();
+        let d = self.device;
         tch::no_grad(|| {
             let indices = tch::Tensor::arange_start(
                 self.next as i64,
                 (self.next + batch_size) as i64,
-                (tch::Kind::Int64, tch::Device::Cpu),
+                (tch::Kind::Int64, d),
             )
             .remainder(batch_size as i64);
             self.prev_states = self.prev_states.index_copy(0, &indices, prev_states);
             self.states = self.states.index_copy(0, &indices, states);
             self.actions = self.actions.index_copy(0, &indices, actions);
-            self.rewards = self
-                .rewards
-                .index_copy(0, &indices, &tch::Tensor::of_slice(rewards));
+            self.rewards = self.rewards.index_copy(
+                0,
+                &indices,
+                &tch::Tensor::of_slice(rewards).to(self.device),
+            );
             self.dones = self.dones.index_copy(
                 0,
                 &indices,
-                &tch::Tensor::of_slice(dones).to_dtype(tch::Kind::Float, true, false),
+                &tch::Tensor::of_slice(dones)
+                    .to_dtype(tch::Kind::Float, true, false)
+                    .to(self.device),
             );
         });
         self.next = (self.next + batch_size) % self.capacity;
@@ -156,7 +161,7 @@ impl ReplayBuffer {
         let indices = tch::Tensor::randint(
             self.capacity as i64,
             &[batch_size as i64],
-            (tch::Kind::Int, tch::Device::Cpu),
+            (tch::Kind::Int, self.device),
         );
         (
             self.prev_states.index_select(0, &indices),
@@ -208,14 +213,14 @@ pub fn pixels_to_tensor(pixels: &[(u8, u8, u8)], img_size: i64) -> tch::Tensor {
 }
 
 /// Converts results to tensor of states.
-pub fn results_to_state(results: &PaintStepResult) -> tch::Tensor {
+pub fn results_to_state(results: &PaintStepResult, device: tch::Device) -> tch::Tensor {
     let mut obs_vec = Vec::new();
     for (state, _, _) in &results.results {
         let canvas_channels = pixels_to_tensor(&state.canvas, IMG_SIZE as i64);
         let ref_channels = pixels_to_tensor(&state.reference, IMG_SIZE as i64);
         obs_vec.push(tch::Tensor::cat(&[canvas_channels, ref_channels], 0));
     }
-    tch::Tensor::stack(&obs_vec, 0)
+    tch::Tensor::stack(&obs_vec, 0).to(device)
 }
 
 /// Converts tensors to actions.
@@ -236,6 +241,12 @@ pub fn tensor_to_actions(tensor: &tch::Tensor) -> Vec<PaintAction> {
 }
 
 fn main() -> Result<(), anyhow::Error> {
+    let device = if USE_CUDA {
+        tch::Device::Cuda(0)
+    } else {
+        tch::Device::Cpu
+    };
+
     // Plotting stuff
     let avg_reward_output_path = std::path::Path::new(AVG_REWARD_OUTPUT);
     if avg_reward_output_path.exists() {
@@ -261,6 +272,7 @@ fn main() -> Result<(), anyhow::Error> {
                 &[batch_size, IMG_CHANNELS, IMG_SIZE, IMG_SIZE],
                 &[batch_size, ACTION_DIM],
             ],
+            USE_CUDA,
         );
         export_model(
             py,
@@ -271,6 +283,7 @@ fn main() -> Result<(), anyhow::Error> {
                 action_dim: ACTION_DIM,
             },
             &[&[batch_size, IMG_CHANNELS, IMG_SIZE, IMG_SIZE]],
+            USE_CUDA,
         );
     });
     cleanup_py();
@@ -280,18 +293,17 @@ fn main() -> Result<(), anyhow::Error> {
     } else {
         ("temp/QNet.ptc", "temp/PNet.ptc")
     };
-    let mut q_net = TrainableModel::load(q_path);
-    let mut p_net = TrainableModel::load(p_path);
+    let mut q_net = TrainableModel::load(q_path, device);
+    let mut p_net = TrainableModel::load(p_path, device);
     q_net.module.set_eval();
     p_net.module.set_eval();
-    let mut q_target = TrainableModel::load(q_path);
-    let mut p_target = TrainableModel::load(p_path);
+    let mut q_target = TrainableModel::load(q_path, device);
+    let mut p_target = TrainableModel::load(p_path, device);
     q_target.module.set_eval();
     p_target.module.set_eval();
     let mut q_opt = tch::nn::Adam::default().build(&q_net.vs, 0.001)?;
     let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, 0.003)?;
 
-    let mut rng = rand::thread_rng();
     let (mut envs, mut results) = PaintGym::init(
         ENV_COUNT,
         IMG_SIZE,
@@ -299,43 +311,35 @@ fn main() -> Result<(), anyhow::Error> {
         MAX_ENV_STEPS,
         RENDERING,
     );
-    let mut replay_buffer = ReplayBuffer::new(BUFFER_CAPACITY);
+    let mut replay_buffer = ReplayBuffer::new(BUFFER_CAPACITY, device);
     for step in (0..STEPS).progress() {
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
             // Execute random policy for first couple steps
             if step < STEPS_BEFORE_POLICY {
-                let mut action_tensors = Vec::new();
-                for _ in 0..envs.num_envs {
-                    let action_tensor = (1.0 / envs.canvas_size as f32)
-                        * tch::Tensor::of_slice(&[
-                            rng.gen_range(0..envs.canvas_size) as f32,
-                            rng.gen_range(0..envs.canvas_size) as f32,
-                            rng.gen_range(0..envs.canvas_size) as f32,
-                            rng.gen_range(0..envs.canvas_size) as f32,
-                        ])
-                        .unsqueeze(0);
-                    action_tensors.push(action_tensor);
-                }
-                Ok(tch::Tensor::cat(&action_tensors, 0))
+                Ok(tch::Tensor::rand(
+                    &[envs.num_envs as i64, 4],
+                    (tch::Kind::Float, device),
+                ))
             }
             // Use learned policy afterwards
             else {
-                let obs = results_to_state(&results);
+                let obs = results_to_state(&results, device);
                 let noise = tch::Tensor::ones(
                     &[envs.num_envs as i64, ACTION_DIM as i64],
-                    (tch::Kind::Float, tch::Device::Cpu),
+                    (tch::Kind::Float, device),
                 )
                 .normal_(0.0, EPSILON as f64);
                 Ok((p_net.module.forward_ts(&[obs])? + noise).clamp(0.0, 1.0))
             }
-        })?;
+        })?
+        .to(device);
         let actions = tensor_to_actions(&actions_tensor);
 
-        let prev_state = results_to_state(&results);
+        let prev_state = results_to_state(&results, device);
         results = envs.step(&actions, false);
         replay_buffer.insert_batch(
             &prev_state,
-            &results_to_state(&results),
+            &results_to_state(&results, device),
             &actions_tensor,
             &results.results.iter().map(|r| r.1).collect::<Vec<_>>(),
             &results.results.iter().map(|r| r.2).collect::<Vec<_>>(),
@@ -350,6 +354,11 @@ fn main() -> Result<(), anyhow::Error> {
                 for _ in 0..TRAIN_ITERATIONS {
                     let (prev_states, states, actions, rewards, dones) =
                         replay_buffer.sample(TRAIN_BATCH_SIZE);
+                    let prev_states = prev_states;
+                    let states = states;
+                    let actions = actions;
+                    let rewards = rewards;
+                    let dones = dones;
 
                     // Perform value optimization
                     let mut targets: tch::Tensor = rewards
@@ -360,22 +369,17 @@ fn main() -> Result<(), anyhow::Error> {
                                 .forward_ts(&[&states, &p_target.module.forward_ts(&[&states])?])?;
                     targets = targets.detach();
                     let diff = &targets - q_net.module.forward_ts(&[&prev_states, &actions])?;
-                    let q_loss =
-                        (1.0 / TRAIN_BATCH_SIZE as f32) * (&diff * &diff).sum(tch::Kind::Float);
+                    let q_loss = (&diff * &diff).mean(tch::Kind::Float);
 
                     q_opt.zero_grad();
                     q_loss.backward();
                     q_opt.step();
 
                     // Perform policy optimization
-                    let p_loss = -(1.0 / TRAIN_BATCH_SIZE as f32)
-                        * q_net
-                            .module
-                            .forward_ts(&[
-                                &prev_states,
-                                &p_net.module.forward_ts(&[&prev_states])?,
-                            ])?
-                            .sum(tch::Kind::Float);
+                    let p_loss = -q_net
+                        .module
+                        .forward_ts(&[&prev_states, &p_net.module.forward_ts(&[&prev_states])?])?
+                        .mean(tch::Kind::Float);
 
                     p_opt.zero_grad();
                     p_loss.backward();
@@ -391,30 +395,21 @@ fn main() -> Result<(), anyhow::Error> {
             }
 
             if step % STEPS_BEFORE_EVAL == 0 {
+                envs.eval_mode();
                 tch::no_grad(|| -> Result<(), anyhow::Error> {
                     // Evaluate the model's performance
-                    envs.eval_mode();
-                    let mut avg_rewards_now = Vec::new();
-                    for _ in 0..EVAL_RUNS {
-                        let mut avg_reward = 0.0;
-                        for _ in 0..MAX_ENV_STEPS {
-                            let obs = results_to_state(&results);
-                            let actions_tensor = p_net.module.forward_ts(&[obs])?;
-                            let actions = tensor_to_actions(&actions_tensor);
-                            results = envs.step(&actions, true);
-                            avg_reward += results.results[0].1;
-                            if results.results[0].2 {
-                                break;
-                            }
-                        }
-                        avg_rewards_now.push(avg_reward);
+                    let mut avg_reward = 0.0;
+                    for _ in 0..MAX_ENV_STEPS {
+                        let obs = results_to_state(&results, device);
+                        let actions_tensor = p_net.module.forward_ts(&[obs])?;
+                        let actions = tensor_to_actions(&actions_tensor);
+                        results = envs.step(&actions, true);
+                        avg_reward += results.results.iter().map(|x| x.1).sum::<f32>();
                     }
-                    avg_rewards.push(
-                        avg_rewards_now.iter().sum::<f32>() / ((MAX_ENV_STEPS * EVAL_RUNS) as f32),
-                    );
-                    envs.train_mode();
+                    avg_rewards.push(avg_reward / ((MAX_ENV_STEPS * ENV_COUNT) as f32));
                     Ok(())
                 })?;
+                envs.train_mode();
             }
 
             if step % STEPS_BEFORE_PLOTTING == 0 {

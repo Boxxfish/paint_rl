@@ -356,7 +356,6 @@ impl PaintGym {
     }
 
     /// Switches the environments to use eval mode.
-    /// During this mode, only a single environment is used.
     pub fn eval_mode(&mut self) {
         self.canvases = (0..(self.canvas_size * self.canvas_size * self.num_envs))
             .map(|_| (255, 255, 255))
@@ -377,7 +376,6 @@ impl PaintGym {
     }
 
     /// Switches the environments to use train mode.
-    /// During this mode, multiple environments are used.
     pub fn train_mode(&mut self) {
         self.canvases = (0..(self.canvas_size * self.canvas_size * self.num_envs))
             .map(|_| (255, 255, 255))

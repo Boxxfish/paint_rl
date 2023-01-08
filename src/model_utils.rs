@@ -9,8 +9,8 @@ pub struct TrainableModel {
 
 impl TrainableModel {
     /// Loads a model from a path.
-    pub fn load(path: &str) -> Self {
-        let vs = tch::nn::VarStore::new(tch::Device::Cpu);
+    pub fn load(path: &str, device: tch::Device) -> Self {
+        let vs = tch::nn::VarStore::new(device);
         let module = tch::jit::TrainableCModule::load(path, vs.root()).unwrap();
         Self {
             module,
@@ -63,6 +63,7 @@ pub fn export_model(
     model_name: &str,
     params: impl IntoPy<PyObject>,
     input_shapes: &[&[u32]],
+    cuda: bool,
 ) {
     let model_utils = py_unwrap(py, py.import("models.model_utils"));
     py_unwrap(
@@ -77,6 +78,7 @@ pub fn export_model(
                     .iter()
                     .map(|x| x.to_vec())
                     .collect::<Vec<Vec<_>>>(),
+                cuda,
             ),
         ),
     );

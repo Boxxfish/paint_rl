@@ -32,20 +32,26 @@ class QNet(torch.nn.Module):
 
     def forward(self, states: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         states = self.state1(states)
+        states = self.state1_norm(states)
         states = self.relu(states)
         states = self.state2(states)
+        states = self.state2_norm(states)
         states = self.relu(states)
         states = self.state_flatten(states)
         states = self.relu(states)
 
         actions = self.action1(actions)
+        actions = self.action1_norm(actions)
         actions = self.relu(actions)
         actions = self.action2(actions)
+        actions = self.action2_norm(actions)
         actions = self.relu(actions)
 
         x = self.dense1(torch.cat([states, actions], dim=1))
+        x = self.dense1_norm(x)
         x = self.relu(x)
         x = self.dense2(x)
+        x = self.dense2_norm(x)
         x = self.relu(x)
         x = self.out(x)
         return x
