@@ -16,7 +16,7 @@ pub struct PaintGym {
     /// Number of steps performed in each environment.
     steps: Vec<u32>,
     /// Reward if the time limit is hit. Should be negative.
-    failure_reward: i32,
+    failure_reward: f32,
     /// Time limit for each environment.
     max_steps: u32,
     window: Option<Window>,
@@ -144,7 +144,7 @@ impl PaintGym {
     pub fn init(
         num_envs: u32,
         canvas_size: u32,
-        failure_reward: i32,
+        failure_reward: f32,
         max_steps: u32,
         render: bool,
     ) -> (Self, PaintStepResult) {
@@ -301,7 +301,7 @@ impl PaintGym {
             self.steps[env_id] += 1;
             if self.steps[env_id] > self.max_steps {
                 dones[env_id] = true;
-                rewards[env_id] += self.failure_reward as f32;
+                rewards[env_id] += self.failure_reward;
             }
         }
 

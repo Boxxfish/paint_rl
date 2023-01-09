@@ -2,8 +2,8 @@ use clap::Parser;
 use indicatif::ProgressIterator;
 use paint_gym::gym::{PaintAction, PaintGym, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
+use paint_gym::monitor::Monitor;
 use paint_gym::replay_buffer::ReplayBuffer;
-use plotters::prelude::*;
 use pyo3::prelude::*;
 use tch::nn::OptimizerConfig;
 
@@ -36,8 +36,8 @@ struct Args {
     #[arg(long, default_value_t = 50)]
     max_env_steps: u32,
     /// Reward given if the maximum number of steps is reached. Should be negative.
-    #[arg(long, default_value_t = -10)]
-    failure_reward: i32,
+    #[arg(long, default_value_t = -1.0, allow_hyphen_values(true))]
+    failure_reward: f32,
     /// Number of iterations during training.
     #[arg(long, default_value_t = 10)]
     train_iterations: u32,
@@ -167,9 +167,12 @@ fn main() -> Result<(), anyhow::Error> {
     if avg_reward_output_path.exists() {
         std::fs::remove_file(AVG_REWARD_OUTPUT)?;
     }
-    let root = BitMapBackend::new(AVG_REWARD_OUTPUT, (640, 480)).into_drawing_area();
-    let mut avg_rewards: Vec<f32> =
-        Vec::with_capacity((args.steps / args.samples_before_eval) as usize);
+    let mut monitor = Monitor::new(100, AVG_REWARD_OUTPUT);
+    let eval_reward_metric = monitor.add_metric("Eval Reward");
+    let q_loss_metric = monitor.add_metric("Q Loss");
+    let p_loss_metric = monitor.add_metric("P Loss");
+    let avg_reward_metric = monitor.add_metric("Avg. Reward");
+    monitor.init();
 
     // Load models
     pyo3::prepare_freethreaded_python();
@@ -244,7 +247,9 @@ fn main() -> Result<(), anyhow::Error> {
         device,
     );
     for step in (0..args.steps).progress() {
+        monitor.add_step();
         let sample = step * args.env_count as u32;
+
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
             // Execute random policy for first couple steps
             if sample < args.samples_before_policy {
@@ -256,14 +261,15 @@ fn main() -> Result<(), anyhow::Error> {
             // Use learned policy afterwards
             else {
                 let obs = results_to_state(&results, device);
-                let mut noise = tch::Tensor::ones(
-                    &[envs.num_envs as i64, ACTION_DIM],
-                    (tch::Kind::Float, device),
-                );
+                let mut actions_tensor = p_net.module.forward_ts(&[obs])?;
                 if epsilon > 0.001 {
-                    noise = noise.normal_(0.0, epsilon);
+                    actions_tensor += tch::Tensor::ones(
+                        &[envs.num_envs as i64, ACTION_DIM],
+                        (tch::Kind::Float, device),
+                    )
+                    .normal_(0.0, epsilon);
                 }
-                Ok((p_net.module.forward_ts(&[obs])? + noise).clamp(0.0, 1.0))
+                Ok((actions_tensor).clamp(0.0, 1.0))
             }
         })?
         .to(device);
@@ -278,6 +284,10 @@ fn main() -> Result<(), anyhow::Error> {
             &actions_tensor,
             &results.results.iter().map(|r| r.1).collect::<Vec<_>>(),
             &results.results.iter().map(|r| r.2).collect::<Vec<_>>(),
+        );
+        monitor.log_metric(
+            avg_reward_metric,
+            results.results.iter().map(|r| r.1).sum::<f32>() / args.env_count as f32,
         );
 
         if replay_buffer.is_full() {
@@ -305,6 +315,7 @@ fn main() -> Result<(), anyhow::Error> {
                     targets = targets.detach();
                     let diff = &targets - q_net.module.forward_ts(&[&prev_states, &actions])?;
                     let q_loss = (&diff * &diff).mean(tch::Kind::Float);
+                    monitor.log_metric(q_loss_metric, q_loss.double_value(&[]) as f32);
 
                     q_opt.zero_grad();
                     q_loss.backward();
@@ -315,6 +326,7 @@ fn main() -> Result<(), anyhow::Error> {
                         .module
                         .forward_ts(&[&prev_states, &p_net.module.forward_ts(&[&prev_states])?])?
                         .mean(tch::Kind::Float);
+                    monitor.log_metric(p_loss_metric, p_loss.double_value(&[]) as f32);
 
                     p_opt.zero_grad();
                     p_loss.backward();
@@ -341,29 +353,13 @@ fn main() -> Result<(), anyhow::Error> {
                         results = envs.step(&actions, true);
                         avg_reward += results.results.iter().map(|x| x.1).sum::<f32>();
                     }
-                    avg_rewards
-                        .push(avg_reward / ((args.max_env_steps * args.env_count as u32) as f32));
+                    monitor.log_metric(
+                        eval_reward_metric,
+                        avg_reward / ((args.max_env_steps * args.env_count as u32) as f32),
+                    );
                     Ok(())
                 })?;
                 envs.train_mode();
-            }
-
-            if sample % args.samples_before_eval == 0 {
-                // Plot results
-                let min_reward = *avg_rewards.iter().min_by(|&&x, &y| x.total_cmp(y)).unwrap();
-                let max_reward = *avg_rewards.iter().max_by(|&&x, &y| x.total_cmp(y)).unwrap();
-                root.fill(&WHITE)?;
-                let mut chart = ChartBuilder::on(&root)
-                    .margin(100)
-                    .x_label_area_size(30)
-                    .y_label_area_size(30)
-                    .build_cartesian_2d(0..avg_rewards.len(), min_reward..max_reward)?;
-                chart.configure_mesh().draw()?;
-                chart.draw_series(LineSeries::new(
-                    avg_rewards.iter().enumerate().map(|(x, y)| (x, *y)),
-                    RED,
-                ))?;
-                root.present()?;
             }
         }
     }
@@ -371,5 +367,6 @@ fn main() -> Result<(), anyhow::Error> {
     envs.cleanup();
     q_net.module.save("temp/QNet.pt")?;
     p_net.module.save("temp/PNet.pt")?;
+    monitor.stop();
     Ok(())
 }
