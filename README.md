@@ -1,4 +1,5 @@
 # PaintGym
+aka my attempts to use AI to quickly add lineart, base colors, and rendering to sketches.
 
 First pass:
 [x] Add ability to control size of the image through config.
@@ -14,7 +15,7 @@ Second pass (Get agent working on environment):
 [x] Upgrade to batch mode.
 [x] Check if cuda makes a difference in training speed.
 [x] Add CLI parsing for hyperparameters and fix environments not reloading correctly.
-[] Add monitor.
+[x] Add monitor.
 [] Hyperparameter search integration.
 [] Switch to PPO.
 [] Iterate until model gives satisfactory results.

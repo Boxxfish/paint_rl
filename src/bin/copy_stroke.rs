@@ -168,10 +168,10 @@ fn main() -> Result<(), anyhow::Error> {
         std::fs::remove_file(AVG_REWARD_OUTPUT)?;
     }
     let mut monitor = Monitor::new(100, AVG_REWARD_OUTPUT);
-    let eval_reward_metric = monitor.add_metric("Eval Reward");
-    let q_loss_metric = monitor.add_metric("Q Loss");
-    let p_loss_metric = monitor.add_metric("P Loss");
-    let avg_reward_metric = monitor.add_metric("Avg. Reward");
+    let eval_reward_metric = monitor.add_metric("eval_reward");
+    let q_loss_metric = monitor.add_metric("q_loss");
+    let p_loss_metric = monitor.add_metric("p_loss");
+    let avg_reward_metric = monitor.add_metric("avg_reward");
     monitor.init();
 
     // Load models
@@ -299,11 +299,6 @@ fn main() -> Result<(), anyhow::Error> {
                 for _ in 0..(args.train_iterations) {
                     let (prev_states, states, actions, rewards, dones) =
                         replay_buffer.sample(args.train_batch_size);
-                    let prev_states = prev_states;
-                    let states = states;
-                    let actions = actions;
-                    let rewards = rewards;
-                    let dones = dones;
 
                     // Perform value optimization
                     let mut targets: tch::Tensor = rewards

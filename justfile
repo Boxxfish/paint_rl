@@ -19,6 +19,10 @@ default:
 @bench:
    cargo bench
 
+# Run tuner.
+@tune NAME OBJECTIVE TRIALS *ARGS:
+   RUSTFLAGS="-C target-cpu=native" python models/tune.py --name {{NAME}} --objective {{OBJECTIVE}} --trials {{TRIALS}} -- {{ARGS}}
+
 # Perform linting and formatting.
 @lint:
    cargo fmt && cargo clippy --fix --allow-staged --allow-dirty 

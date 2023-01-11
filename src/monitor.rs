@@ -21,7 +21,7 @@ pub struct Monitor {
     pub plot_every: u32,
     pub unsent_data: Vec<Vec<Option<f32>>>,
     pub data_tx: Option<Sender<ThreadMsg>>,
-    pub bg_work_handle: Option<std::thread::JoinHandle<()>>,
+    pub bg_work_handle: Option<std::thread::JoinHandle<Vec<Vec<Option<f32>>>>>,
     pub current_step: u32,
     pub metrics: HashMap<usize, String>,
     pub metric_count: usize,
@@ -91,7 +91,7 @@ impl Monitor {
                 let incoming: ThreadMsg = rx.recv().unwrap();
                 match incoming {
                     ThreadMsg::Data(data) => rows.extend(data),
-                    ThreadMsg::Stop => break,
+                    ThreadMsg::Stop => break rows,
                 }
 
                 if rows.is_empty() {
@@ -114,38 +114,49 @@ impl Monitor {
                         .filter(|(_, val)| val.is_some())
                         .map(|(i, val)| (i, val.unwrap()))
                         .collect::<Vec<(usize, f32)>>();
-                    let min_range = metric_values
-                        .iter()
-                        .min_by(|x, y| x.1.total_cmp(&y.1))
-                        .unwrap()
-                        .1;
-                    let max_range = metric_values
-                        .iter()
-                        .max_by(|x, y| x.1.total_cmp(&y.1))
-                        .unwrap()
-                        .1;
-                    let mut chart = ChartBuilder::on(area)
-                        .margin(20)
-                        .x_label_area_size(30)
-                        .y_label_area_size(30)
-                        .caption(metric_name, ("sans-serif", 32))
-                        .build_cartesian_2d(0..rows.len(), min_range..max_range)
-                        .unwrap();
-                    chart.configure_mesh().draw().unwrap();
-                    chart
-                        .draw_series(LineSeries::new(metric_values, RED))
-                        .unwrap();
+                    if !metric_values.is_empty() {
+                        let min_range = metric_values
+                            .iter()
+                            .min_by(|x, y| x.1.total_cmp(&y.1))
+                            .unwrap()
+                            .1;
+                        let max_range = metric_values
+                            .iter()
+                            .max_by(|x, y| x.1.total_cmp(&y.1))
+                            .unwrap()
+                            .1;
+                        let mut chart = ChartBuilder::on(area)
+                            .margin(20)
+                            .x_label_area_size(30)
+                            .y_label_area_size(30)
+                            .caption(metric_name, ("sans-serif", 32))
+                            .build_cartesian_2d(0..rows.len(), min_range..max_range)
+                            .unwrap();
+                        chart.configure_mesh().draw().unwrap();
+                        chart
+                            .draw_series(LineSeries::new(metric_values, RED))
+                            .unwrap();
+                    }
                 }
                 root.present().unwrap();
             }
         });
+
         self.bg_work_handle = Some(handle);
         self.data_tx = Some(tx);
     }
 
-    /// Stops the monitor.
+    /// Stops the monitor and outputs latest metrics to console.
     pub fn stop(self) {
         self.data_tx.unwrap().send(ThreadMsg::Stop).unwrap();
-        self.bg_work_handle.unwrap().join().unwrap();
+        let rows = self.bg_work_handle.unwrap().join().unwrap();
+        for (&index, name) in &self.metrics {
+            let val = rows.iter().filter_map(|row| row[index]).last();
+            let val = match val {
+                Some(val) => val.to_string(),
+                None => "None".to_string(),
+            };
+            println!("{name}: {val}");
+        }
     }
 }
