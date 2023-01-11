@@ -1,19 +1,18 @@
+//! A setup for training an agent to copy strokes from an image.
+//! The agent reads in the current canvas and reference image, and outputs
+//! brush strokes.
+//! The environment stops once a difference threshold is reached, or after the time limit is hit.
+//! The difference at each time step is given as the reward.
+
 use clap::Parser;
 use indicatif::ProgressIterator;
+use paint_gym::algorithms::ddpg;
 use paint_gym::gym::{PaintAction, PaintGym, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
 use paint_gym::monitor::Monitor;
 use paint_gym::replay_buffer::ReplayBuffer;
 use pyo3::prelude::*;
 use tch::nn::OptimizerConfig;
-
-//
-// A setup for training an agent to copy strokes from an image.
-// The agent reads in the current canvas and reference image, and outputs
-// brush strokes.
-// The environment stops once a difference threshold is reached, or after the time limit is hit.
-// The difference at each time step is given as the reward.
-//
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -47,6 +46,12 @@ struct Args {
     /// Polyak factor for updating target networks.
     #[arg(long, default_value_t = 0.95)]
     polyak: f32,
+    /// Learning rate for value network.
+    #[arg(long, default_value_t = 0.001)]
+    q_lr: f64,
+    /// Learning rate for policy network.
+    #[arg(long, default_value_t = 0.003)]
+    p_lr: f64,
     /// Discount factor when propagating rewards.
     #[arg(long, default_value_t = 0.95)]
     discount: f32,
@@ -88,21 +93,6 @@ struct PNetParams {
     img_size: i64,
     #[pyo3(get)]
     action_dim: i64,
-}
-
-/// Performs polyak averaging between two networks.
-/// When `p` is 0, `dest`'s weights are used. When `p` is 1, `src`'s weights are used.
-/// This modifies `dest`.
-fn polyak_avg(src: &tch::nn::VarStore, dest: &mut tch::nn::VarStore, p: f32) {
-    tch::no_grad(|| {
-        for (dest, src) in dest
-            .trainable_variables()
-            .iter_mut()
-            .zip(src.trainable_variables().iter())
-        {
-            dest.copy_(&(p * src + (1.0 - p) * &*dest));
-        }
-    })
 }
 
 /// Converts a Vec of pixel tuples into a tensor.
@@ -163,10 +153,6 @@ fn main() -> Result<(), anyhow::Error> {
     let mut epsilon = args.epsilon;
 
     // Plotting stuff
-    let avg_reward_output_path = std::path::Path::new(AVG_REWARD_OUTPUT);
-    if avg_reward_output_path.exists() {
-        std::fs::remove_file(AVG_REWARD_OUTPUT)?;
-    }
     let mut monitor = Monitor::new(100, AVG_REWARD_OUTPUT);
     let eval_reward_metric = monitor.add_metric("eval_reward");
     let q_loss_metric = monitor.add_metric("q_loss");
@@ -222,16 +208,10 @@ fn main() -> Result<(), anyhow::Error> {
     } else {
         ("temp/QNet.ptc", "temp/PNet.ptc")
     };
-    let mut q_net = TrainableModel::load(q_path, device);
-    let mut p_net = TrainableModel::load(p_path, device);
-    q_net.module.set_eval();
-    p_net.module.set_eval();
-    let mut q_target = TrainableModel::load(q_path, device);
-    let mut p_target = TrainableModel::load(p_path, device);
-    q_target.module.set_eval();
-    p_target.module.set_eval();
-    let mut q_opt = tch::nn::Adam::default().build(&q_net.vs, 0.001)?;
-    let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, 0.003)?;
+    let (mut q_net, mut q_target) = TrainableModel::load2(q_path, device);
+    let (mut p_net, mut p_target) = TrainableModel::load2(p_path, device);
+    let mut q_opt = tch::nn::Adam::default().build(&q_net.vs, args.q_lr)?;
+    let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, args.p_lr)?;
 
     let (mut envs, mut results) = PaintGym::init(
         args.env_count as u32,
@@ -293,47 +273,22 @@ fn main() -> Result<(), anyhow::Error> {
         if replay_buffer.is_full() {
             if sample % args.samples_before_training == 0 {
                 envs.do_bg_work();
-                q_net.module.set_train();
-                p_net.module.set_train();
-
-                for _ in 0..(args.train_iterations) {
-                    let (prev_states, states, actions, rewards, dones) =
-                        replay_buffer.sample(args.train_batch_size);
-
-                    // Perform value optimization
-                    let mut targets: tch::Tensor = rewards
-                        + args.discount
-                            * (1.0 - dones)
-                            * q_target
-                                .module
-                                .forward_ts(&[&states, &p_target.module.forward_ts(&[&states])?])?;
-                    targets = targets.detach();
-                    let diff = &targets - q_net.module.forward_ts(&[&prev_states, &actions])?;
-                    let q_loss = (&diff * &diff).mean(tch::Kind::Float);
-                    monitor.log_metric(q_loss_metric, q_loss.double_value(&[]) as f32);
-
-                    q_opt.zero_grad();
-                    q_loss.backward();
-                    q_opt.step();
-
-                    // Perform policy optimization
-                    let p_loss = -q_net
-                        .module
-                        .forward_ts(&[&prev_states, &p_net.module.forward_ts(&[&prev_states])?])?
-                        .mean(tch::Kind::Float);
-                    monitor.log_metric(p_loss_metric, p_loss.double_value(&[]) as f32);
-
-                    p_opt.zero_grad();
-                    p_loss.backward();
-                    p_opt.step();
-
-                    // Move targets
-                    polyak_avg(&q_net.vs, &mut q_target.vs, args.polyak);
-                    polyak_avg(&p_net.vs, &mut p_target.vs, args.polyak);
-                }
-
-                q_net.module.set_eval();
-                p_net.module.set_eval();
+                ddpg::train(
+                    &mut q_net,
+                    &mut p_net,
+                    &mut q_target,
+                    &mut p_target,
+                    &mut q_opt,
+                    &mut p_opt,
+                    q_loss_metric,
+                    p_loss_metric,
+                    &mut monitor,
+                    &replay_buffer,
+                    args.train_iterations,
+                    args.train_batch_size,
+                    args.discount,
+                    args.polyak,
+                )?;
             }
 
             if sample % args.samples_before_eval == 0 {

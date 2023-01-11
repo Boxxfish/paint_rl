@@ -9,14 +9,23 @@ pub struct TrainableModel {
 
 impl TrainableModel {
     /// Loads a model from a path.
+    /// This also sets the model in eval mode.
     pub fn load(path: &str, device: tch::Device) -> Self {
         let vs = tch::nn::VarStore::new(device);
-        let module = tch::jit::TrainableCModule::load(path, vs.root()).unwrap();
+        let mut module = tch::jit::TrainableCModule::load(path, vs.root()).unwrap();
+        module.set_eval();
         Self {
             module,
             vs,
             path: path.to_string(),
         }
+    }
+
+    /// Loads two models from the same path.
+    /// This is useful for loading both a network and its target.
+    /// The models are put in eval mode.
+    pub fn load2(path: &str, device: tch::Device) -> (Self, Self) {
+        (Self::load(path, device), Self::load(path, device))
     }
 }
 
