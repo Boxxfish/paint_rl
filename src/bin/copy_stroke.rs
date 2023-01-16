@@ -3,14 +3,12 @@
 //! brush strokes.
 //! The environment stops once a difference threshold is reached, or after the time limit is hit.
 //! The difference at each time step is given as the reward.
-
 use clap::Parser;
 use indicatif::ProgressIterator;
-use paint_gym::algorithms::ddpg;
 use paint_gym::gym::{PaintAction, PaintGym, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
 use paint_gym::monitor::Monitor;
-use paint_gym::replay_buffer::ReplayBuffer;
+use paint_gym::rollout_buffer::RolloutBuffer;
 use pyo3::prelude::*;
 use tch::nn::OptimizerConfig;
 
@@ -22,20 +20,17 @@ struct Args {
     /// Number of steps to run through.
     #[arg(long, default_value_t = 10000)]
     steps: u32,
-    /// Number of samples to collect before training, after the replay buffer is full.
-    #[arg(long, default_value_t = 512)]
-    samples_before_training: u32,
-    /// Number of samples to collect before using a non-random policy.
-    #[arg(long, default_value_t = 1024)]
-    samples_before_policy: u32,
-    /// Number of samples to collect before evaluating the model.
-    #[arg(long, default_value_t = 2048)]
-    samples_before_eval: u32,
+    /// Number of steps that comprise a single rollout.
+    #[arg(long, default_value_t = 16)]
+    rollout_steps: u32,
+    /// Number of rollouts to run through before evaluating the model.
+    #[arg(long, default_value_t = 100)]
+    rollouts_before_eval: u32,
     /// Maximum number of steps to take in the environment before failure.
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 10)]
     max_env_steps: u32,
     /// Reward given if the maximum number of steps is reached. Should be negative.
-    #[arg(long, default_value_t = -1.0, allow_hyphen_values(true))]
+    #[arg(long, default_value_t = 0.0, allow_hyphen_values(true))]
     failure_reward: f32,
     /// Number of iterations during training.
     #[arg(long, default_value_t = 10)]
@@ -43,22 +38,19 @@ struct Args {
     /// Minibatch size during training.
     #[arg(long, default_value_t = 64)]
     train_batch_size: usize,
-    /// Polyak factor for updating target networks.
+    /// Lambda used for GAE .
     #[arg(long, default_value_t = 0.95)]
-    polyak: f32,
+    lambda: f32,
     /// Learning rate for value network.
     #[arg(long, default_value_t = 0.001)]
-    q_lr: f64,
+    v_lr: f64,
     /// Learning rate for policy network.
     #[arg(long, default_value_t = 0.003)]
     p_lr: f64,
     /// Discount factor when propagating rewards.
     #[arg(long, default_value_t = 0.95)]
     discount: f32,
-    /// Maximum number of transitions that can be stored in the replay buffer.
-    #[arg(long, default_value_t = 1000)]
-    buffer_capacity: usize,
-    /// Standard deviation of noise applied to policy. This decays as time goes on.
+    /// Clip objective epsilon.
     #[arg(long, default_value_t = 0.2)]
     epsilon: f64,
     /// Whether render should occur when evaluating.
@@ -80,11 +72,9 @@ const ACTION_DIM: i64 = 4;
 const AVG_REWARD_OUTPUT: &str = "temp/avg_rewards.png";
 
 #[pyclass]
-struct QNetParams {
+struct VNetParams {
     #[pyo3(get)]
     img_size: i64,
-    #[pyo3(get)]
-    action_dim: i64,
 }
 
 #[pyclass]
@@ -142,6 +132,47 @@ pub fn tensor_to_actions(tensor: &tch::Tensor) -> Vec<PaintAction> {
     actions
 }
 
+/// Copies parameters from one network to another.
+fn copy_params(src: &tch::nn::VarStore, dest: &mut tch::nn::VarStore) {
+    tch::no_grad(|| {
+        for (dest, src) in dest
+            .trainable_variables()
+            .iter_mut()
+            .zip(src.trainable_variables().iter())
+        {
+            dest.copy_(src);
+        }
+    })
+}
+
+/// Samples actions from means and scales.
+fn sample(means: &tch::Tensor, scales: &tch::Tensor, device: tch::Device) -> tch::Tensor {
+    let normals = tch::Tensor::ones(&means.size(), (tch::Kind::Float, device)).normal_(0.0, 1.0);
+    normals * scales + means
+}
+
+/// Returns the log probabilities of actions being performed.
+/// For each item in the batch, a single probability is computed by summing the individual log probabilities of a single action.
+fn action_log_probs(
+    values: &tch::Tensor,
+    means: &tch::Tensor,
+    scales: &tch::Tensor,
+    device: tch::Device,
+) -> tch::Tensor {
+    let shape = means.size();
+    let values = values.flatten(0, 1);
+    let means = means.flatten(0, 1);
+    let scales = scales.flatten(0, 1);
+    let diffs = &values - &means;
+    let log_probs: tch::Tensor = -(&diffs * &diffs) / (2.0 * &scales * &scales)
+        - scales.log()
+        - std::f32::consts::TAU.sqrt().ln()
+            * tch::Tensor::ones(&scales.size(), (tch::Kind::Float, device));
+    let log_probs = log_probs.reshape(&shape);
+    let log_probs = log_probs.sum_dim_intlist(Some([1].as_slice()), false, tch::Kind::Float);
+    log_probs
+}
+
 fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
@@ -150,12 +181,11 @@ fn main() -> Result<(), anyhow::Error> {
     } else {
         tch::Device::Cpu
     };
-    let mut epsilon = args.epsilon;
 
     // Plotting stuff
-    let mut monitor = Monitor::new(100, AVG_REWARD_OUTPUT);
+    let mut monitor = Monitor::new(500, AVG_REWARD_OUTPUT);
     let eval_reward_metric = monitor.add_metric("eval_reward");
-    let q_loss_metric = monitor.add_metric("q_loss");
+    let v_loss_metric = monitor.add_metric("v_loss");
     let p_loss_metric = monitor.add_metric("p_loss");
     let avg_reward_metric = monitor.add_metric("avg_reward");
     monitor.init();
@@ -167,26 +197,20 @@ fn main() -> Result<(), anyhow::Error> {
         let batch_size = 10;
         export_model(
             py,
-            "copy_stroke_ddpg",
-            "QNet",
-            QNetParams {
-                img_size: IMG_SIZE,
-                action_dim: ACTION_DIM,
-            },
-            &[
-                &[
-                    batch_size,
-                    IMG_CHANNELS as u32,
-                    IMG_SIZE as u32,
-                    IMG_SIZE as u32,
-                ],
-                &[batch_size, ACTION_DIM as u32],
-            ],
+            "copy_stroke_models",
+            "VNet",
+            VNetParams { img_size: IMG_SIZE },
+            &[&[
+                batch_size,
+                IMG_CHANNELS as u32,
+                IMG_SIZE as u32,
+                IMG_SIZE as u32,
+            ]],
             args.cuda,
         );
         export_model(
             py,
-            "copy_stroke_ddpg",
+            "copy_stroke_models",
             "PNet",
             PNetParams {
                 img_size: IMG_SIZE,
@@ -203,14 +227,14 @@ fn main() -> Result<(), anyhow::Error> {
     });
     cleanup_py();
 
-    let (q_path, p_path) = if args.cont {
-        ("temp/QNet.pt", "temp/PNet.pt")
+    let (v_path, p_path) = if args.cont {
+        ("temp/VNet.pt", "temp/PNet.pt")
     } else {
-        ("temp/QNet.ptc", "temp/PNet.ptc")
+        ("temp/VNet.ptc", "temp/PNet.ptc")
     };
-    let (mut q_net, mut q_target) = TrainableModel::load2(q_path, device);
-    let (mut p_net, mut p_target) = TrainableModel::load2(p_path, device);
-    let mut q_opt = tch::nn::Adam::default().build(&q_net.vs, args.q_lr)?;
+    let mut v_net = TrainableModel::load(v_path, device);
+    let (mut p_net, mut p_net_old) = TrainableModel::load2(p_path, device);
+    let mut v_opt = tch::nn::Adam::default().build(&v_net.vs, args.v_lr)?;
     let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, args.p_lr)?;
 
     let (mut envs, mut results) = PaintGym::init(
@@ -220,45 +244,29 @@ fn main() -> Result<(), anyhow::Error> {
         args.max_env_steps,
         args.render,
     );
-    let mut replay_buffer = ReplayBuffer::new(
+    let mut rollout_buffer = RolloutBuffer::new(
         &[IMG_CHANNELS, IMG_SIZE, IMG_SIZE],
         &[ACTION_DIM],
-        args.buffer_capacity,
+        args.env_count as usize,
+        args.rollout_steps as usize,
         device,
     );
     for step in (0..args.steps).progress() {
         monitor.add_step();
-        let sample = step * args.env_count as u32;
 
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
-            // Execute random policy for first couple steps
-            if sample < args.samples_before_policy {
-                Ok(tch::Tensor::rand(
-                    &[envs.num_envs as i64, 4],
-                    (tch::Kind::Float, device),
-                ))
-            }
-            // Use learned policy afterwards
-            else {
-                let obs = results_to_state(&results, device);
-                let mut actions_tensor = p_net.module.forward_ts(&[obs])?;
-                if epsilon > 0.001 {
-                    actions_tensor += tch::Tensor::ones(
-                        &[envs.num_envs as i64, ACTION_DIM],
-                        (tch::Kind::Float, device),
-                    )
-                    .normal_(0.0, epsilon);
-                }
-                Ok((actions_tensor).clamp(0.0, 1.0))
-            }
-        })?
-        .to(device);
-        let actions = tensor_to_actions(&actions_tensor);
-        epsilon -= 1.0 / args.steps as f64;
+            let obs = results_to_state(&results, device);
+            let actions_tensor = p_net.module.forward_ts(&[obs])?.to(device);
+            let means = actions_tensor.get(0);
+            let scales = actions_tensor.get(1);
+            let actions = sample(&means, &scales, device);
+            Ok(actions)
+        })?;
+        let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
 
         let prev_state = results_to_state(&results, device);
         results = envs.step(&actions, false);
-        replay_buffer.insert_batch(
+        rollout_buffer.insert_step(
             &prev_state,
             &results_to_state(&results, device),
             &actions_tensor,
@@ -270,36 +278,66 @@ fn main() -> Result<(), anyhow::Error> {
             results.results.iter().map(|r| r.1).sum::<f32>() / args.env_count as f32,
         );
 
-        if replay_buffer.is_full() {
-            if sample % args.samples_before_training == 0 {
-                envs.do_bg_work();
-                ddpg::train(
-                    &mut q_net,
-                    &mut p_net,
-                    &mut q_target,
-                    &mut p_target,
-                    &mut q_opt,
-                    &mut p_opt,
-                    q_loss_metric,
-                    p_loss_metric,
-                    &mut monitor,
-                    &replay_buffer,
-                    args.train_iterations,
-                    args.train_batch_size,
-                    args.discount,
-                    args.polyak,
-                )?;
-            }
+        if step % args.rollout_steps == 0 {
+            envs.do_bg_work();
 
-            if sample % args.samples_before_eval == 0 {
+            let batches = rollout_buffer.samples(
+                args.train_batch_size as u32,
+                args.discount,
+                args.lambda,
+                &v_net,
+            );
+            // Train policy
+            p_net.module.set_train();
+            v_net.module.set_train();
+            copy_params(&p_net.vs, &mut p_net_old.vs);
+            let mut last_p_loss = 0.0;
+            for (prev_states, _, actions, _, _, advantages, _) in &batches {
+                p_opt.zero_grad();
+                let new_output = p_net.module.forward_ts(&[prev_states]).unwrap();
+                let new_log_probs =
+                    action_log_probs(actions, &new_output.get(0), &new_output.get(1), device);
+                let old_output = p_net_old.module.forward_ts(&[prev_states]).unwrap();
+                let old_log_probs =
+                    action_log_probs(actions, &old_output.get(0), &old_output.get(1), device);
+                let ratios = (&new_log_probs - &old_log_probs).exp();
+                let term1 = ratios * advantages;
+                let ones = tch::Tensor::ones(&advantages.size(), (tch::Kind::Float, device));
+                let term2 = &(ones - args.epsilon * advantages.sign()) * advantages;
+                let p_loss = term1.min_other(&term2).mean(tch::Kind::Float);
+                last_p_loss = p_loss.double_value(&[]) as f32;
+                p_loss.backward();
+                p_opt.step();
+            }
+            monitor.log_metric(p_loss_metric, last_p_loss);
+
+            // Train value function
+            let mut last_v_loss = 0.0;
+            for (prev_states, _, _, _, rewards_to_go, _, _) in &batches {
+                v_opt.zero_grad();
+                let diff = v_net.module.forward_ts(&[prev_states]).unwrap() - rewards_to_go;
+                let v_loss = (&diff * &diff).mean(tch::Kind::Float);
+                last_v_loss = v_loss.double_value(&[]) as f32;
+                v_loss.backward();
+                v_opt.step();
+            }
+            monitor.log_metric(v_loss_metric, last_v_loss);
+
+            p_net.module.set_eval();
+            v_net.module.set_eval();
+
+            rollout_buffer.clear();
+
+            // Eval after a certain number of rollouts
+            if (step * args.rollout_steps) % args.rollouts_before_eval == 0 {
                 envs.eval_mode();
                 tch::no_grad(|| -> Result<(), anyhow::Error> {
                     // Evaluate the model's performance
                     let mut avg_reward = 0.0;
                     for _ in 0..args.max_env_steps {
                         let obs = results_to_state(&results, device);
-                        let actions_tensor = p_net.module.forward_ts(&[obs])?;
-                        let actions = tensor_to_actions(&actions_tensor);
+                        let actions_tensor = p_net.module.forward_ts(&[obs])?.get(0);
+                        let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
                         results = envs.step(&actions, true);
                         avg_reward += results.results.iter().map(|x| x.1).sum::<f32>();
                     }
@@ -315,7 +353,7 @@ fn main() -> Result<(), anyhow::Error> {
     }
 
     envs.cleanup();
-    q_net.module.save("temp/QNet.pt")?;
+    v_net.module.save("temp/VNet.pt")?;
     p_net.module.save("temp/PNet.pt")?;
     monitor.stop();
     Ok(())

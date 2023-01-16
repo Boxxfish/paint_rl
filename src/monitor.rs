@@ -151,11 +151,14 @@ impl Monitor {
         self.data_tx.unwrap().send(ThreadMsg::Stop).unwrap();
         let rows = self.bg_work_handle.unwrap().join().unwrap();
         for (&index, name) in &self.metrics {
-            let val = rows.iter().filter_map(|row| row[index]).last();
-            let val = match val {
-                Some(val) => val.to_string(),
-                None => "None".to_string(),
-            };
+            let mut vals: Vec<f32> = rows.iter().filter_map(|row| row[index]).collect();
+            // Use average of the last 5 values
+            let avg_samples = 5;
+            let mut avg_val_vec = Vec::new();
+            for _ in 0..avg_samples {
+                avg_val_vec.push(vals.pop().unwrap());
+            }
+            let val = avg_val_vec.iter().sum::<f32>() / avg_samples as f32;
             println!("{name}: {val}");
         }
     }

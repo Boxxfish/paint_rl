@@ -8,8 +8,8 @@ First pass:
 - [x] Create agent with random policy for testing.
 - [x] Get benchmarking set up with realistic training times.
 - [x] Add real time plotting functionality.
-- 
-- Second pass (Get agent working on environment):
+
+Second pass (Get agent working on environment):
 - [x] Get model exporting working.
 - [x] Set up model in copy stroke environment for single env.
 - [x] Upgrade to batch mode.
@@ -17,5 +17,8 @@ First pass:
 - [x] Add CLI parsing for hyperparameters and fix environments not reloading correctly.
 - [x] Add monitor.
 - [x] Hyperparameter search integration.
-- [] Switch to PPO.
-- [] Iterate until model gives satisfactory results.
+- [ ] Create debug environments (constant obs, constant reward, etc).
+- [ ] Unit test buffers.
+- [ ] Create vectorized cartpole environment for discrete and continuous cases.
+- [ ] Switch to PPO.
+- [ ] Iterate until model gives satisfactory results.

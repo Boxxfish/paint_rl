@@ -38,3 +38,11 @@ def get_img_size(old_img_size: int, conv: torch.nn.Conv2d) -> int:
     Returns the size of the image after the convolution is run on it.
     """
     return (old_img_size + 2 * int(conv.padding[0]) - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) // conv.stride[0] + 1
+
+def init_orthogonal(module: torch.nn.Module):
+    """
+    Initializes the weights of the model so they're orthogonal.
+    """
+    for param in module.parameters():
+        if len(param.shape) > 1:
+            torch.nn.init.orthogonal_(param)

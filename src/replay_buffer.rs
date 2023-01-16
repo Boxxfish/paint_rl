@@ -1,6 +1,6 @@
 /// Stores transitions and generates mini batches.
+/// When new elements are inserted, they overwrite old data.
 pub struct ReplayBuffer {
-    /// Previous state, state, action, reward, done
     pub prev_states: tch::Tensor,
     pub states: tch::Tensor,
     pub actions: tch::Tensor,
