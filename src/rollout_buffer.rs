@@ -20,6 +20,7 @@ impl RolloutBuffer {
     pub fn new(
         state_shape: &[i64],
         action_shape: &[i64],
+        action_dtype: tch::Kind,
         num_envs: usize,
         num_steps: usize,
         device: tch::Device,
@@ -37,7 +38,8 @@ impl RolloutBuffer {
             next: 0,
             prev_states: tch::Tensor::zeros(&state_shape_vec, (k, device)).requires_grad_(false),
             states: tch::Tensor::zeros(&state_shape_vec, (k, device)).requires_grad_(false),
-            actions: tch::Tensor::zeros(&action_shape_vec, (k, device)).requires_grad_(false),
+            actions: tch::Tensor::zeros(&action_shape_vec, (action_dtype, device))
+                .requires_grad_(false),
             rewards: tch::Tensor::zeros(&[num_steps_i64, num_envs_i64], (k, device))
                 .requires_grad_(false),
             dones: tch::Tensor::zeros(&[num_steps_i64, num_envs_i64], (k, device))
@@ -90,7 +92,7 @@ impl RolloutBuffer {
         tch::Tensor,
     )> {
         let _guard = tch::no_grad_guard();
-        // Calculate advantage estimates
+        // Calculate advantage estimates and rewards to go
         let tensor_opts = (tch::Kind::Float, self.device);
         let rewards_to_go =
             tch::Tensor::zeros(&[self.num_steps as i64, self.num_envs as i64], tensor_opts)
@@ -100,7 +102,7 @@ impl RolloutBuffer {
                 .requires_grad_(false);
         let mut step_rewards_to_go = v_net
             .module
-            .forward_ts(&[&self.states.get(self.states.size()[0] - 1).squeeze()])
+            .forward_ts(&[&self.states.get(self.states.size()[0] - 1)])
             .unwrap()
             .squeeze();
         let mut step_advantages = tch::Tensor::zeros(&[self.num_envs as i64], tensor_opts);
@@ -110,9 +112,9 @@ impl RolloutBuffer {
             let rewards = self.rewards.get(i as _);
             let dones = self.dones.get(i as _);
             let prev_state_values = v_net.module.forward_ts(&[prev_states]).unwrap().squeeze();
-            let state_values = v_net.module.forward_ts(&[states]).unwrap().squeeze();
-            let delta = &rewards + discount * &dones * state_values - prev_state_values;
-            step_rewards_to_go = rewards + discount * step_rewards_to_go * &dones;
+            let state_values = v_net.module.forward_ts(&[&states]).unwrap().squeeze();
+            let delta = &rewards + discount * (1.0 - &dones) * state_values - prev_state_values;
+            step_rewards_to_go = rewards + discount * step_rewards_to_go * (1.0 - &dones);
             rewards_to_go.get(i as _).copy_(&step_rewards_to_go);
             step_advantages = delta + discount * lambda * step_advantages * dones;
             advantages.get(i as _).copy_(&step_advantages);

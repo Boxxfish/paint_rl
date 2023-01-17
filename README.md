@@ -17,8 +17,6 @@ Second pass (Get agent working on environment):
 - [x] Add CLI parsing for hyperparameters and fix environments not reloading correctly.
 - [x] Add monitor.
 - [x] Hyperparameter search integration.
-- [ ] Create debug environments (constant obs, constant reward, etc).
-- [ ] Unit test buffers.
-- [ ] Create vectorized cartpole environment for discrete and continuous cases.
+- [x] Create debug environments (constant obs, constant reward, etc).
 - [ ] Switch to PPO.
 - [ ] Iterate until model gives satisfactory results.
