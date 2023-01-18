@@ -91,7 +91,9 @@ impl RolloutBuffer {
         tch::Tensor,
         tch::Tensor,
     )> {
-        let _guard = tch::no_grad_guard();
+        // `guard` must be written in this way, or the compiler might remove it
+        #[allow(unused_variables)]
+        let guard = tch::no_grad_guard();
         // Calculate advantage estimates and rewards to go
         let tensor_opts = (tch::Kind::Float, self.device);
         let rewards_to_go =

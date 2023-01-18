@@ -9,7 +9,7 @@ use paint_gym::gym::{PaintAction, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
 use paint_gym::monitor::Monitor;
 use paint_gym::rollout_buffer::RolloutBuffer;
-use paint_gym::test_envs::debug::{Obs0Reward1Env, ObsDependentRewardEnv};
+use paint_gym::test_envs::debug::{Obs0Reward1Env, ObsDependentRewardEnv, DelayedRewardEnv, ConstCorrectActionEnv};
 use pyo3::prelude::*;
 use tch::nn::OptimizerConfig;
 
@@ -152,7 +152,7 @@ fn sample_logits(logits: &tch::Tensor, device: tch::Device) -> tch::Tensor {
     let samples = tch::Tensor::rand(&[batch_size], (tch::Kind::Float, device));
     let mut sample_idxs = Vec::new();
     for i in 0..batch_size {
-        let sample_idx = (logits.double_value(&[i, 0]) < samples.double_value(&[i])) as u32;
+        let sample_idx = if samples.double_value(&[i]) < logits.double_value(&[i, 0]) { 0 } else {1};
         sample_idxs.push(sample_idx as i64);
     }
     tch::Tensor::of_slice(&sample_idxs)
@@ -164,7 +164,7 @@ fn action_log_probs_discrete(
     log_probs: &tch::Tensor,
     _device: tch::Device,
 ) -> tch::Tensor {
-    log_probs.index_select(1, &actions.squeeze())
+    log_probs.take(&actions.squeeze().unsqueeze(0).to_dtype(tch::Kind::Int64, false, true)).squeeze()
 }
 
 /// Returns the log probabilities of actions being performed.
@@ -248,7 +248,7 @@ fn main() -> Result<(), anyhow::Error> {
     //     args.max_env_steps,
     //     args.render,
     // );
-    let mut envs = ObsDependentRewardEnv::new(args.env_count as usize);
+    let mut envs = ConstCorrectActionEnv::new(args.env_count as usize);
     let mut results: Vec<_> = envs.reset().iter().map(|val| (*val, 0.0, false)).collect();
     let mut rollout_buffer = RolloutBuffer::new(
         &[1],
@@ -315,11 +315,9 @@ fn main() -> Result<(), anyhow::Error> {
                 let new_log_probs = action_log_probs_discrete(actions, &new_output, device);
                 let old_output = p_net_old.module.forward_ts(&[prev_states]).unwrap();
                 let old_log_probs = action_log_probs_discrete(actions, &old_output, device);
-                let ratios = (&new_log_probs - &old_log_probs).exp();
-                let term1 = ratios * advantages;
-                let ones = tch::Tensor::ones(&advantages.size(), (tch::Kind::Float, device));
-                let term2 = &(ones - args.epsilon * advantages.sign()) * advantages;
-                let p_loss = term1.min_other(&term2).mean(tch::Kind::Float);
+                let term1 = (&new_log_probs - &old_log_probs).exp() * advantages;
+                let term2: tch::Tensor = (1.0 + args.epsilon * advantages.sign()) * advantages;
+                let p_loss = -term1.minimum(&term2).mean(tch::Kind::Float);
                 last_p_loss = p_loss.double_value(&[]) as f32;
                 p_loss.backward();
                 p_opt.step();
