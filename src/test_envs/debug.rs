@@ -77,7 +77,7 @@ impl ObsDependentRewardEnv {
             let obs = self.last_obs[i];
             let reward = obs * -1.0;
             self.last_obs[i] = (rng.gen_bool(0.5) as i32 * 2 - 1) as f32;
-            results.push((obs, reward, true))
+            results.push((self.last_obs[i], reward, true))
         }
         results
     }

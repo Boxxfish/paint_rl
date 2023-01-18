@@ -9,7 +9,7 @@ use paint_gym::gym::{PaintAction, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
 use paint_gym::monitor::Monitor;
 use paint_gym::rollout_buffer::RolloutBuffer;
-use paint_gym::test_envs::debug::Obs0Reward1Env;
+use paint_gym::test_envs::debug::{Obs0Reward1Env, ObsDependentRewardEnv};
 use pyo3::prelude::*;
 use tch::nn::OptimizerConfig;
 
@@ -248,7 +248,7 @@ fn main() -> Result<(), anyhow::Error> {
     //     args.max_env_steps,
     //     args.render,
     // );
-    let envs = Obs0Reward1Env::new(args.env_count as usize);
+    let mut envs = ObsDependentRewardEnv::new(args.env_count as usize);
     let mut results: Vec<_> = envs.reset().iter().map(|val| (*val, 0.0, false)).collect();
     let mut rollout_buffer = RolloutBuffer::new(
         &[1],
@@ -330,7 +330,7 @@ fn main() -> Result<(), anyhow::Error> {
             let mut last_v_loss = 0.0;
             for (prev_states, _, _, _, rewards_to_go, _, _) in &batches {
                 v_opt.zero_grad();
-                let diff = v_net.module.forward_ts(&[prev_states]).unwrap() - rewards_to_go;
+                let diff = v_net.module.forward_ts(&[prev_states]).unwrap() - rewards_to_go.unsqueeze(1);
                 let v_loss = (&diff * &diff).mean(tch::Kind::Float);
                 last_v_loss = v_loss.double_value(&[]) as f32;
                 v_loss.backward();
@@ -365,6 +365,10 @@ fn main() -> Result<(), anyhow::Error> {
                         }
                         results = envs.step(&actions);
                         avg_reward += results.iter().map(|x| x.1).sum::<f32>();
+                        // println!("{}", v_net
+                        // .module
+                        // .forward_ts(&[&obs])
+                        // .unwrap());
                         pred_value += v_net
                             .module
                             .forward_ts(&[&obs])

@@ -110,24 +110,24 @@ impl RolloutBuffer {
             let prev_states = self.prev_states.get(i as _);
             let states = self.states.get(i as _);
             let rewards = self.rewards.get(i as _);
-            let dones = self.dones.get(i as _);
+            let inv_dones = 1.0 - self.dones.get(i as _);
             let prev_state_values = v_net.module.forward_ts(&[prev_states]).unwrap().squeeze();
             let state_values = v_net.module.forward_ts(&[&states]).unwrap().squeeze();
-            let delta = &rewards + discount * (1.0 - &dones) * state_values - prev_state_values;
-            step_rewards_to_go = rewards + discount * step_rewards_to_go * (1.0 - &dones);
+            let delta = &rewards + discount * &inv_dones * state_values - prev_state_values;
+            step_rewards_to_go = rewards + discount * step_rewards_to_go * &inv_dones;
             rewards_to_go.get(i as _).copy_(&step_rewards_to_go);
-            step_advantages = delta + discount * lambda * step_advantages * dones;
+            step_advantages = delta + discount * lambda * step_advantages * inv_dones;
             advantages.get(i as _).copy_(&step_advantages);
         }
         let exp_count = self.num_envs * self.num_steps;
-        let indices = tch::Tensor::randperm(self.num_steps as i64, (tch::Kind::Int, self.device));
-        let rand_prev_states = self.prev_states.index_select(0, &indices).flatten(0, 1);
-        let rand_states = self.states.index_select(0, &indices).flatten(0, 1);
-        let rand_actions = self.actions.index_select(0, &indices).flatten(0, 1);
-        let rand_rewards = self.rewards.index_select(0, &indices).flatten(0, 1);
-        let rand_rewards_to_go = rewards_to_go.index_select(0, &indices).flatten(0, 1);
-        let rand_advantages = advantages.index_select(0, &indices).flatten(0, 1);
-        let rand_dones = self.dones.index_select(0, &indices).flatten(0, 1);
+        let indices = tch::Tensor::randperm(exp_count as i64, (tch::Kind::Int, self.device));
+        let rand_prev_states = self.prev_states.flatten(0, 1).index_select(0, &indices);
+        let rand_states = self.states.flatten(0, 1).index_select(0, &indices);
+        let rand_actions = self.actions.flatten(0, 1).index_select(0, &indices);
+        let rand_rewards = self.rewards.flatten(0, 1).index_select(0, &indices);
+        let rand_rewards_to_go = rewards_to_go.flatten(0, 1).index_select(0, &indices);
+        let rand_advantages = advantages.flatten(0, 1).index_select(0, &indices);
+        let rand_dones = self.dones.flatten(0, 1).index_select(0, &indices);
         let batch_count = exp_count as u32 / batch_size;
         let mut batches = Vec::new();
         for i in 0..batch_count {
