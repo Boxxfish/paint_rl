@@ -7,7 +7,7 @@ use crate::{
 /// Performs polyak averaging between two networks.
 /// When `p` is 0, `dest`'s weights are used. When `p` is 1, `src`'s weights are used.
 /// This modifies `dest`.
-fn polyak_avg(src: &tch::nn::VarStore, dest: &mut tch::nn::VarStore, p: f32) {
+pub fn polyak_avg(src: &tch::nn::VarStore, dest: &mut tch::nn::VarStore, p: f32) {
     tch::no_grad(|| {
         for (dest, src) in dest
             .trainable_variables()

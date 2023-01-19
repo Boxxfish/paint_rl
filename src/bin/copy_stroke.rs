@@ -5,11 +5,12 @@
 //! The difference at each time step is given as the reward.
 use clap::Parser;
 use indicatif::ProgressIterator;
+use paint_gym::algorithms::ddpg::polyak_avg;
 use paint_gym::gym::{PaintAction, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
 use paint_gym::monitor::Monitor;
 use paint_gym::rollout_buffer::RolloutBuffer;
-use paint_gym::test_envs::debug::{Obs0Reward1Env, ObsDependentRewardEnv, DelayedRewardEnv, ConstCorrectActionEnv};
+use paint_gym::test_envs::debug::{Obs0Reward1Env, ObsDependentRewardEnv, DelayedRewardEnv, ConstCorrectActionEnv, ObsActionDependentRewardEnv};
 use pyo3::prelude::*;
 use tch::nn::OptimizerConfig;
 
@@ -46,7 +47,7 @@ struct Args {
     #[arg(long, default_value_t = 0.001)]
     v_lr: f64,
     /// Learning rate for policy network.
-    #[arg(long, default_value_t = 0.003)]
+    #[arg(long, default_value_t = 0.0003)]
     p_lr: f64,
     /// Discount factor when propagating rewards.
     #[arg(long, default_value_t = 0.95)]
@@ -248,7 +249,7 @@ fn main() -> Result<(), anyhow::Error> {
     //     args.max_env_steps,
     //     args.render,
     // );
-    let mut envs = ConstCorrectActionEnv::new(args.env_count as usize);
+    let mut envs = ObsActionDependentRewardEnv::new(args.env_count as usize);
     let mut results: Vec<_> = envs.reset().iter().map(|val| (*val, 0.0, false)).collect();
     let mut rollout_buffer = RolloutBuffer::new(
         &[1],
@@ -297,44 +298,60 @@ fn main() -> Result<(), anyhow::Error> {
 
         if step % args.rollout_steps == 0 {
             // envs.do_bg_work();
-
-            let batches = rollout_buffer.samples(
-                args.train_batch_size as u32,
-                args.discount,
-                args.lambda,
-                &v_net,
-            );
-            // Train policy
+            // Train networks
             p_net.module.set_train();
             v_net.module.set_train();
+            p_net_old.module.set_train();
             copy_params(&p_net.vs, &mut p_net_old.vs);
-            let mut last_p_loss = 0.0;
-            for (prev_states, _, actions, _, _, advantages, _) in &batches {
-                p_opt.zero_grad();
-                let new_output = p_net.module.forward_ts(&[prev_states]).unwrap();
-                let new_log_probs = action_log_probs_discrete(actions, &new_output, device);
-                let old_output = p_net_old.module.forward_ts(&[prev_states]).unwrap();
-                let old_log_probs = action_log_probs_discrete(actions, &old_output, device);
-                let term1 = (&new_log_probs - &old_log_probs).exp() * advantages;
-                let term2: tch::Tensor = (1.0 + args.epsilon * advantages.sign()) * advantages;
-                let p_loss = -term1.minimum(&term2).mean(tch::Kind::Float);
-                last_p_loss = p_loss.double_value(&[]) as f32;
-                p_loss.backward();
-                p_opt.step();
-            }
-            monitor.log_metric(p_loss_metric, last_p_loss);
-
-            // Train value function
             let mut last_v_loss = 0.0;
-            for (prev_states, _, _, _, rewards_to_go, _, _) in &batches {
-                v_opt.zero_grad();
-                let diff = v_net.module.forward_ts(&[prev_states]).unwrap() - rewards_to_go.unsqueeze(1);
-                let v_loss = (&diff * &diff).mean(tch::Kind::Float);
-                last_v_loss = v_loss.double_value(&[]) as f32;
-                v_loss.backward();
-                v_opt.step();
+            let mut last_p_loss = 0.0;
+
+            for _ in 0..args.train_iterations {
+
+                let batches = rollout_buffer.samples(
+                    args.train_batch_size as u32,
+                    args.discount,
+                    args.lambda,
+                    &v_net,
+                );
+
+                for (prev_states, _, actions, _, _, advantages, _) in &batches {
+                    // Train policy network
+                    let old_output = p_net_old.module.forward_ts(&[prev_states]).unwrap();
+                    let old_log_probs = action_log_probs_discrete(actions, &old_output, device);
+                    p_opt.zero_grad();
+                    let new_output = p_net.module.forward_ts(&[prev_states]).unwrap();
+                    let new_log_probs = action_log_probs_discrete(actions, &new_output, device);
+                    let term1 = (&new_log_probs - &old_log_probs).exp() * advantages;
+                    let term2: tch::Tensor = (1.0 + args.epsilon * advantages.sign()) * advantages;
+                    let p_loss = -(term1.min_other(&term2).mean(tch::Kind::Float));
+                    last_p_loss = p_loss.double_value(&[]) as f32;
+                    p_loss.backward();
+                    p_opt.step();
+                }
             }
+            
+            for _ in 0..args.train_iterations {
+                let batches = rollout_buffer.samples(
+                    args.train_batch_size as u32,
+                    args.discount,
+                    args.lambda,
+                    &v_net,
+                );
+
+                for (prev_states, _, _, _, rewards_to_go, _, _) in &batches {
+                    // Train value network
+                    v_opt.zero_grad();
+                    let diff = v_net.module.forward_ts(&[prev_states]).unwrap() - rewards_to_go.unsqueeze(1);
+                    let v_loss = (&diff * &diff).mean(tch::Kind::Float);
+                    last_v_loss = v_loss.double_value(&[]) as f32;
+                    v_loss.backward();
+                    v_opt.step();
+                }
+            }
+
             monitor.log_metric(v_loss_metric, last_v_loss);
+            monitor.log_metric(p_loss_metric, last_p_loss);
 
             p_net.module.set_eval();
             v_net.module.set_eval();
@@ -363,10 +380,6 @@ fn main() -> Result<(), anyhow::Error> {
                         }
                         results = envs.step(&actions);
                         avg_reward += results.iter().map(|x| x.1).sum::<f32>();
-                        // println!("{}", v_net
-                        // .module
-                        // .forward_ts(&[&obs])
-                        // .unwrap());
                         pred_value += v_net
                             .module
                             .forward_ts(&[&obs])
