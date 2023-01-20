@@ -5,12 +5,12 @@
 //! The difference at each time step is given as the reward.
 use clap::Parser;
 use indicatif::ProgressIterator;
-use paint_gym::algorithms::ddpg::polyak_avg;
-use paint_gym::gym::{PaintAction, PaintStepResult, Pixel};
+
+use paint_gym::gym::{PaintAction, PaintGym, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
 use paint_gym::monitor::Monitor;
 use paint_gym::rollout_buffer::RolloutBuffer;
-use paint_gym::test_envs::debug::{Obs0Reward1Env, ObsDependentRewardEnv, DelayedRewardEnv, ConstCorrectActionEnv, ObsActionDependentRewardEnv};
+
 use pyo3::prelude::*;
 use tch::nn::OptimizerConfig;
 
@@ -23,13 +23,13 @@ struct Args {
     #[arg(long, default_value_t = 10000)]
     steps: u32,
     /// Number of steps that comprise a single rollout.
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 32)]
     rollout_steps: u32,
     /// Number of rollouts to run through before evaluating the model.
     #[arg(long, default_value_t = 100)]
     rollouts_before_eval: u32,
     /// Maximum number of steps to take in the environment before failure.
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 30)]
     max_env_steps: u32,
     /// Reward given if the maximum number of steps is reached. Should be negative.
     #[arg(long, default_value_t = 0.0, allow_hyphen_values(true))]
@@ -74,10 +74,18 @@ const ACTION_DIM: i64 = 4;
 const AVG_REWARD_OUTPUT: &str = "temp/avg_rewards.png";
 
 #[pyclass]
-struct VNetParams {}
+struct VNetParams {
+    #[pyo3(get)]
+    img_size: i64,
+}
 
 #[pyclass]
-struct PNetParams {}
+struct PNetParams {
+    #[pyo3(get)]
+    img_size: i64,
+    #[pyo3(get)]
+    action_dim: i64,
+}
 
 /// Converts a Vec of pixel tuples into a tensor.
 pub fn pixels_to_tensor(pixels: &[(u8, u8, u8)], img_size: i64) -> tch::Tensor {
@@ -145,29 +153,6 @@ fn sample(means: &tch::Tensor, scales: &tch::Tensor, device: tch::Device) -> tch
     normals * scales + means
 }
 
-/// Samples actions from log logits.
-fn sample_logits(logits: &tch::Tensor, device: tch::Device) -> tch::Tensor {
-    // We're cheating a bit here since we know we only have 2 actions
-    let batch_size = logits.size()[0];
-    let logits = logits.exp();
-    let samples = tch::Tensor::rand(&[batch_size], (tch::Kind::Float, device));
-    let mut sample_idxs = Vec::new();
-    for i in 0..batch_size {
-        let sample_idx = if samples.double_value(&[i]) < logits.double_value(&[i, 0]) { 0 } else {1};
-        sample_idxs.push(sample_idx as i64);
-    }
-    tch::Tensor::of_slice(&sample_idxs)
-}
-
-/// Returns the log probabilities of discrete actions being performed.
-fn action_log_probs_discrete(
-    actions: &tch::Tensor,
-    log_probs: &tch::Tensor,
-    _device: tch::Device,
-) -> tch::Tensor {
-    log_probs.take(&actions.squeeze().unsqueeze(0).to_dtype(tch::Kind::Int64, false, true)).squeeze()
-}
-
 /// Returns the log probabilities of actions being performed.
 /// For each item in the batch, a single probability is computed by summing the individual log probabilities of a single action.
 fn action_log_probs_cont(
@@ -215,18 +200,31 @@ fn main() -> Result<(), anyhow::Error> {
         let batch_size = 10;
         export_model(
             py,
-            "test_models",
+            "copy_stroke_models",
             "VNet",
-            VNetParams {},
-            &[&[batch_size, 1]],
+            VNetParams { img_size: IMG_SIZE },
+            &[&[
+                batch_size,
+                IMG_CHANNELS as u32,
+                IMG_SIZE as u32,
+                IMG_SIZE as u32,
+            ]],
             args.cuda,
         );
         export_model(
             py,
-            "test_models",
+            "copy_stroke_models",
             "PNet",
-            PNetParams {},
-            &[&[batch_size, 1]],
+            PNetParams {
+                img_size: IMG_SIZE,
+                action_dim: ACTION_DIM,
+            },
+            &[&[
+                batch_size,
+                IMG_CHANNELS as u32,
+                IMG_SIZE as u32,
+                IMG_SIZE as u32,
+            ]],
             args.cuda,
         );
     });
@@ -242,19 +240,17 @@ fn main() -> Result<(), anyhow::Error> {
     let mut v_opt = tch::nn::Adam::default().build(&v_net.vs, args.v_lr)?;
     let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, args.p_lr)?;
 
-    // let (mut envs, mut results) = PaintGym::init(
-    //     args.env_count as u32,
-    //     IMG_SIZE as u32,
-    //     args.failure_reward,
-    //     args.max_env_steps,
-    //     args.render,
-    // );
-    let mut envs = ObsActionDependentRewardEnv::new(args.env_count as usize);
-    let mut results: Vec<_> = envs.reset().iter().map(|val| (*val, 0.0, false)).collect();
+    let (mut envs, mut results) = PaintGym::init(
+        args.env_count as u32,
+        IMG_SIZE as u32,
+        args.failure_reward,
+        args.max_env_steps,
+        args.render,
+    );
     let mut rollout_buffer = RolloutBuffer::new(
-        &[1],
-        &[1],
-        tch::Kind::Int,
+        &[IMG_CHANNELS, IMG_SIZE, IMG_SIZE],
+        &[ACTION_DIM],
+        tch::Kind::Float,
         args.env_count as usize,
         args.rollout_steps as usize,
         device,
@@ -262,42 +258,32 @@ fn main() -> Result<(), anyhow::Error> {
     for step in (0..args.steps).progress() {
         monitor.add_step();
 
-        let obs = tch::Tensor::of_slice(&results.iter().map(|(x, _, _)| *x).collect::<Vec<_>>())
-            .unsqueeze(1);
+        let obs = results_to_state(&results, device);
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
-            // let obs = results_to_state(&results, device);
             let actions_tensor = p_net.module.forward_ts(&[&obs])?.to(device);
-            // let means = actions_tensor.get(0);
-            // let scales = actions_tensor.get(1);
-            // let actions = sample(&means, &scales, device);
-            // Ok(actions)
-            Ok(sample_logits(&actions_tensor, device))
+            let means = actions_tensor.get(0);
+            let scales = actions_tensor.get(1);
+            let actions = sample(&means, &scales, device);
+            Ok(actions)
         })?;
-        // let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
+        let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
 
-        // let prev_state = results_to_state(&results, device);
         let prev_state = obs.copy();
-        let mut actions = Vec::with_capacity(args.env_count as usize);
-        for i in 0..args.env_count {
-            actions.push(actions_tensor.get(i as _).int64_value(&[]) as i32);
-        }
-        results = envs.step(&actions);
+        results = envs.step(&actions, false);
         rollout_buffer.insert_step(
             &prev_state,
-            // &results_to_state(&results, device),
-            &tch::Tensor::of_slice(&results.iter().map(|(x, _, _)| *x).collect::<Vec<_>>())
-                .unsqueeze(1),
-            &actions_tensor.unsqueeze(1),
-            &results.iter().map(|r| r.1).collect::<Vec<_>>(),
-            &results.iter().map(|r| r.2).collect::<Vec<_>>(),
+            &results_to_state(&results, device),
+            &actions_tensor,
+            &results.results.iter().map(|r| r.1).collect::<Vec<_>>(),
+            &results.results.iter().map(|r| r.2).collect::<Vec<_>>(),
         );
         monitor.log_metric(
             avg_reward_metric,
-            results.iter().map(|r| r.1).sum::<f32>() / args.env_count as f32,
+            results.results.iter().map(|r| r.1).sum::<f32>() / args.env_count as f32,
         );
 
         if step % args.rollout_steps == 0 {
-            // envs.do_bg_work();
+            envs.do_bg_work();
             // Train networks
             p_net.module.set_train();
             v_net.module.set_train();
@@ -307,7 +293,6 @@ fn main() -> Result<(), anyhow::Error> {
             let mut last_p_loss = 0.0;
 
             for _ in 0..args.train_iterations {
-
                 let batches = rollout_buffer.samples(
                     args.train_batch_size as u32,
                     args.discount,
@@ -318,10 +303,20 @@ fn main() -> Result<(), anyhow::Error> {
                 for (prev_states, _, actions, _, _, advantages, _) in &batches {
                     // Train policy network
                     let old_output = p_net_old.module.forward_ts(&[prev_states]).unwrap();
-                    let old_log_probs = action_log_probs_discrete(actions, &old_output, device);
+                    let old_log_probs = action_log_probs_cont(
+                        actions,
+                        &old_output.get(0),
+                        &old_output.get(1),
+                        device,
+                    );
                     p_opt.zero_grad();
                     let new_output = p_net.module.forward_ts(&[prev_states]).unwrap();
-                    let new_log_probs = action_log_probs_discrete(actions, &new_output, device);
+                    let new_log_probs = action_log_probs_cont(
+                        actions,
+                        &new_output.get(0),
+                        &new_output.get(1),
+                        device,
+                    );
                     let term1 = (&new_log_probs - &old_log_probs).exp() * advantages;
                     let term2: tch::Tensor = (1.0 + args.epsilon * advantages.sign()) * advantages;
                     let p_loss = -(term1.min_other(&term2).mean(tch::Kind::Float));
@@ -330,7 +325,7 @@ fn main() -> Result<(), anyhow::Error> {
                     p_opt.step();
                 }
             }
-            
+
             for _ in 0..args.train_iterations {
                 let batches = rollout_buffer.samples(
                     args.train_batch_size as u32,
@@ -342,7 +337,8 @@ fn main() -> Result<(), anyhow::Error> {
                 for (prev_states, _, _, _, rewards_to_go, _, _) in &batches {
                     // Train value network
                     v_opt.zero_grad();
-                    let diff = v_net.module.forward_ts(&[prev_states]).unwrap() - rewards_to_go.unsqueeze(1);
+                    let diff = v_net.module.forward_ts(&[prev_states]).unwrap()
+                        - rewards_to_go.unsqueeze(1);
                     let v_loss = (&diff * &diff).mean(tch::Kind::Float);
                     last_v_loss = v_loss.double_value(&[]) as f32;
                     v_loss.backward();
@@ -360,26 +356,19 @@ fn main() -> Result<(), anyhow::Error> {
 
             // Eval after a certain number of rollouts
             if (step * args.rollout_steps) % args.rollouts_before_eval == 0 {
-                // envs.eval_mode();
+                envs.eval_mode();
                 tch::no_grad(|| -> Result<(), anyhow::Error> {
                     // Evaluate the model's performance
                     let mut avg_reward = 0.0;
                     let mut pred_value = 0.0;
                     for _ in 0..args.max_env_steps {
-                        // let obs = results_to_state(&results, device);
-                        let obs = tch::Tensor::of_slice(
-                            &results.iter().map(|(x, _, _)| *x).collect::<Vec<_>>(),
-                        )
-                        .unsqueeze(1);
+                        let obs = results_to_state(&results, device);
+                        let actions_tensor = &p_net.module.forward_ts(&[&obs])?;
                         let actions_tensor =
-                            sample_logits(&p_net.module.forward_ts(&[&obs])?, device);
-                        // let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
-                        let mut actions = Vec::with_capacity(args.env_count as usize);
-                        for i in 0..args.env_count {
-                            actions.push(actions_tensor.get(i as _).int64_value(&[]) as i32);
-                        }
-                        results = envs.step(&actions);
-                        avg_reward += results.iter().map(|x| x.1).sum::<f32>();
+                            sample(&actions_tensor.get(0), &actions_tensor.get(1), device);
+                        let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
+                        results = envs.step(&actions, true);
+                        avg_reward += results.results.iter().map(|x| x.1).sum::<f32>();
                         pred_value += v_net
                             .module
                             .forward_ts(&[&obs])
@@ -397,7 +386,7 @@ fn main() -> Result<(), anyhow::Error> {
                     );
                     Ok(())
                 })?;
-                // envs.train_mode();
+                envs.train_mode();
             }
         }
     }

@@ -28,7 +28,7 @@ fn draw_reference(
     canvas_offset: usize,
     canvas_size: u32,
 ) {
-    let stroke_count = rng.gen_range(0..10);
+    let stroke_count = rng.gen_range(20..30);
     for _ in 0..stroke_count {
         let x0 = rng.gen_range(0..canvas_size) as i32;
         let x1 = rng.gen_range(0..canvas_size) as i32;

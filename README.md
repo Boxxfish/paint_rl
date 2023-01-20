@@ -18,5 +18,8 @@ Second pass (Get agent working on environment):
 - [x] Add monitor.
 - [x] Hyperparameter search integration.
 - [x] Create debug environments (constant obs, constant reward, etc).
-- [ ] Switch to PPO.
-- [ ] Iterate until model gives satisfactory results.
+- [x] Switch to PPO.
+- [ ] Add proper brush (thickness) support.
+- [ ] Iterate on 128x128 sized image with brush thickness of 4 until model gives satisfactory results.
+- [ ] Add colored brush support support.
+- [ ] Iterate on environment until model gives satisfactory results.

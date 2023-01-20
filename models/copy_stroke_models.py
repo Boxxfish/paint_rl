@@ -10,10 +10,10 @@ class VNet(torch.nn.Module):
     def __init__(self, img_size: int):
         super(VNet, self).__init__()
 
-        self.cnn1 = torch.nn.Conv2d(6, 8, 3, 2)
+        self.cnn1 = torch.nn.Conv2d(6, 8, 2, 1)
         cnn1_img_size = get_img_size(img_size, self.cnn1)
         self.cnn1_norm = torch.nn.BatchNorm2d(self.cnn1.out_channels)
-        self.cnn2 = torch.nn.Conv2d(self.cnn1.out_channels, 16, 3, 2)
+        self.cnn2 = torch.nn.Conv2d(self.cnn1.out_channels, 16, 2, 1)
         cnn2_img_size = get_img_size(cnn1_img_size, self.cnn2)
         self.cnn2_norm = torch.nn.BatchNorm2d(self.cnn2.out_channels)
         self.flatten = torch.nn.Flatten()
@@ -38,16 +38,17 @@ class PNet(torch.nn.Module):
     def __init__(self, img_size: int, action_dim: int):
         super(PNet, self).__init__()
         self.action_dim = action_dim
-        self.cnn1 = torch.nn.Conv2d(6, 8, 3, 2)
+        self.cnn1 = torch.nn.Conv2d(6, 8, 2, 1)
         cnn1_img_size = get_img_size(img_size, self.cnn1)
         self.cnn1_norm = torch.nn.BatchNorm2d(self.cnn1.out_channels)
-        self.cnn2 = torch.nn.Conv2d(self.cnn1.out_channels, 16, 3, 2)
+        self.cnn2 = torch.nn.Conv2d(self.cnn1.out_channels, 16, 2, 1)
         cnn2_img_size = get_img_size(cnn1_img_size, self.cnn2)
         self.cnn2_norm = torch.nn.BatchNorm2d(self.cnn2.out_channels)
         self.flatten = torch.nn.Flatten()
         self.means = torch.nn.Linear(cnn2_img_size**2 * self.cnn2.out_channels, action_dim)
         self.scales = torch.nn.Linear(cnn2_img_size**2 * self.cnn2.out_channels, action_dim)
         self.relu = torch.nn.ReLU()
+        self.sigmoid = torch.nn.Sigmoid()
 
         init_orthogonal(self)
 
@@ -59,8 +60,8 @@ class PNet(torch.nn.Module):
         x = self.cnn2_norm(x)
         x = self.relu(x)
         x = self.flatten(x)
-        means = self.means(x)
-        _scales = self.scales(x)
-        scales = torch.ones(means.shape)
+        means = self.sigmoid(self.means(x))
+        _scales = self.sigmoid(self.scales(x))
+        scales = torch.ones(means.shape) * 0.1
         out = torch.stack([means, scales])
         return out
