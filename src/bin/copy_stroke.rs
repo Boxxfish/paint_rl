@@ -67,7 +67,7 @@ struct Args {
 }
 
 // Canvas and reference pixels
-const IMG_SIZE: i64 = 8;
+const IMG_SIZE: i64 = 128;
 const IMG_CHANNELS: i64 = 6;
 // Start (x, y), end (x, y)
 const ACTION_DIM: i64 = 4;
@@ -300,7 +300,7 @@ fn main() -> Result<(), anyhow::Error> {
                     &v_net,
                 );
 
-                for (prev_states, _, actions, _, _, advantages, _) in &batches {
+                for (prev_states, _, actions, _, rewards_to_go, advantages, _) in &batches {
                     // Train policy network
                     let old_output = p_net_old.module.forward_ts(&[prev_states]).unwrap();
                     let old_log_probs = action_log_probs_cont(
@@ -323,18 +323,7 @@ fn main() -> Result<(), anyhow::Error> {
                     last_p_loss = p_loss.double_value(&[]) as f32;
                     p_loss.backward();
                     p_opt.step();
-                }
-            }
 
-            for _ in 0..args.train_iterations {
-                let batches = rollout_buffer.samples(
-                    args.train_batch_size as u32,
-                    args.discount,
-                    args.lambda,
-                    &v_net,
-                );
-
-                for (prev_states, _, _, _, rewards_to_go, _, _) in &batches {
                     // Train value network
                     v_opt.zero_grad();
                     let diff = v_net.module.forward_ts(&[prev_states]).unwrap()

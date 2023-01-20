@@ -16,8 +16,8 @@ default:
    cargo run --bin {{NAME}} -- {{ARGS}}
 
 # Run benchmarks.
-@bench:
-   cargo bench
+@bench TARGET:
+   cargo bench -- {{TARGET}}
 
 # Run tuner.
 @tune NAME OBJECTIVE TRIALS *ARGS:

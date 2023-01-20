@@ -1,7 +1,33 @@
 use criterion::{criterion_group, criterion_main, Criterion};
+use pyo3::{Python, pyclass};
 use rand::prelude::*;
 
-use paint_gym::gym::*;
+use paint_gym::{gym::*, rollout_buffer::RolloutBuffer, model_utils::{prep_py, export_model, cleanup_py, TrainableModel}};
+
+const OBS_SIZE: i64 = 256 * 256 * 3;
+const ACTION_SIZE: i64 = 4;
+const ROLLOUT_STEPS: usize = 16;
+
+fn run_rollout_buffer(env_count: usize, v_net: &TrainableModel) {
+    let mut rng = rand::thread_rng();
+    let device = tch::Device::Cpu;
+    #[allow(unused_variables)]
+    let guard = tch::no_grad_guard();
+    let mut buffer = RolloutBuffer::new(&[OBS_SIZE], &[ACTION_SIZE], tch::Kind::Float, env_count, ROLLOUT_STEPS, device);
+    
+    let mut prev_states = tch::Tensor::rand(&[OBS_SIZE], (tch::Kind::Float, device));
+    for _ in 0..ROLLOUT_STEPS {
+        let states = tch::Tensor::rand(&[env_count as i64, OBS_SIZE], (tch::Kind::Float, device));
+        let actions = tch::Tensor::rand(&[env_count as i64, ACTION_SIZE], (tch::Kind::Float, device));
+        let rewards: Vec<_> = (0..env_count).map(|_| rng.gen()).collect();
+        let dones: Vec<_> = (0..env_count).map(|_| rng.gen()).collect();
+        buffer.insert_step(&prev_states, &states, &actions, &rewards, &dones);
+        prev_states = states.copy();
+    }
+
+    #[allow(unused_variables)]
+    let batches = buffer.samples(((ROLLOUT_STEPS * env_count) / 4) as u32, 0.9, 0.9, v_net);
+}
 
 const TOTAL_STEPS: u32 = 100;
 const CANVAS_SIZE: u32 = 256;
@@ -34,6 +60,40 @@ fn run_copy_stroke(env_count: u32, inf_time_millis: u64, train_time_millis: u64)
     }
 }
 
+#[pyclass]
+struct VNetParams {
+    #[pyo3(get)]
+    obs_size: i64,
+}
+
+fn rollout_buffer_bench(c: &mut Criterion) {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        prep_py(py);
+        let batch_size = 10;
+        export_model(
+            py,
+            "bench_models",
+            "VNet",
+            VNetParams { obs_size: OBS_SIZE },
+            &[&[
+                batch_size,
+                OBS_SIZE as u32,
+            ]],
+            false,
+        );
+    });
+    cleanup_py();
+
+    let v_net = TrainableModel::load("temp/VNet.ptc", tch::Device::Cpu);
+
+    let mut group = c.benchmark_group("rollout_buffer");
+    group.sample_size(30);
+    group.bench_function("envs: 32", |b| {
+        b.iter(|| run_rollout_buffer(32, &v_net))
+    });
+}
+
 fn copy_stroke_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("copy_stroke");
     group.sample_size(10);
@@ -51,5 +111,5 @@ fn copy_stroke_bench(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, copy_stroke_bench);
+criterion_group!(benches, rollout_buffer_bench, copy_stroke_bench);
 criterion_main!(benches);

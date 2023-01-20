@@ -19,6 +19,7 @@ Second pass (Get agent working on environment):
 - [x] Hyperparameter search integration.
 - [x] Create debug environments (constant obs, constant reward, etc).
 - [x] Switch to PPO.
+- [ ] Add benchmark for rollout buffer.
 - [ ] Add proper brush (thickness) support.
 - [ ] Iterate on 128x128 sized image with brush thickness of 4 until model gives satisfactory results.
 - [ ] Add colored brush support support.
