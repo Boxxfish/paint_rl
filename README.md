@@ -21,7 +21,29 @@ Second pass (Get agent working on environment):
 - [x] Switch to PPO.
 - [x] Add benchmark for rollout buffer.
 - [x] Add proper brush (thickness) support.
-- [ ] Anneal standard deviation of brush stroke positions over time.
-- [ ] Iterate on 128x128 sized image with brush thickness of 4 until model gives satisfactory results.
-- [ ] Add colored brush support support.
+- [x] Anneal standard deviation of brush stroke positions over time.
+
+Third pass (Get cloud training working):
+- [ ] Integrate cloud logging service for monitor.
+- [ ] Integrate cloud logging service for Optuna.
+- [ ] Create docker container for repo.
+- [ ] Set up linting in CI (clippy, rustfmt, black, mypy).
+- [ ] Set up docker container building and uploading on `main`.
+- [ ] Run docker container using EC2 spot instance.
+- [ ] Get logging working in cloud.
+- [ ] Create CLI for deploying workloads in cloud.
+- [ ] Add price estimation for workloads.
+- [ ] Get checkpointing and restoring working using S3 (or equivalent), adding the option in the CLI to auto continue if terminated early.
+- [ ] Add ability to request different instances (like compute or memory optimized).
+
+Third pass (Get copy stroke working)
+- [ ] As a test, make sure the agent can learn to stroke a simple square.
+- [ ] Iterate on random stroke 64x64 sized image with brush thickness of 4 until model gives satisfactory results.
+- [ ] Add colored brush support.
+- [ ] Iterate on environment until model gives satisfactory results.
+- [ ] Add bezier curve support.
+- [ ] Iterate on environment until model gives satisfactory results.
+- [ ] Add brush radius support.
+- [ ] Iterate on environment until model gives satisfactory results.
+- [ ] Add opacity support.
 - [ ] Iterate on environment until model gives satisfactory results.

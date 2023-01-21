@@ -46,7 +46,6 @@ class PNet(torch.nn.Module):
         self.cnn2_norm = torch.nn.BatchNorm2d(self.cnn2.out_channels)
         self.flatten = torch.nn.Flatten()
         self.means = torch.nn.Linear(cnn2_img_size**2 * self.cnn2.out_channels, action_dim)
-        self.scales = torch.nn.Linear(cnn2_img_size**2 * self.cnn2.out_channels, action_dim)
         self.relu = torch.nn.ReLU()
         self.sigmoid = torch.nn.Sigmoid()
 
@@ -61,7 +60,4 @@ class PNet(torch.nn.Module):
         x = self.relu(x)
         x = self.flatten(x)
         means = self.sigmoid(self.means(x))
-        _scales = self.sigmoid(self.scales(x))
-        scales = torch.ones(means.shape) * 0.1
-        out = torch.stack([means, scales])
-        return out
+        return means

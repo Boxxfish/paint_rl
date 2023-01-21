@@ -40,6 +40,9 @@ struct Args {
     /// Minibatch size during training.
     #[arg(long, default_value_t = 64)]
     train_batch_size: usize,
+    /// Standard deviation of actions at start, decreases to 0 over time.
+    #[arg(long, default_value_t = 0.5)]
+    action_scale: f32,
     /// Lambda used for GAE .
     #[arg(long, default_value_t = 0.95)]
     lambda: f32,
@@ -67,7 +70,7 @@ struct Args {
 }
 
 // Canvas and reference pixels
-const IMG_SIZE: i64 = 64;
+const IMG_SIZE: i64 = 32;
 const IMG_CHANNELS: i64 = 6;
 // Start (x, y), end (x, y)
 const ACTION_DIM: i64 = 4;
@@ -255,14 +258,15 @@ fn main() -> Result<(), anyhow::Error> {
         args.rollout_steps as usize,
         device,
     );
+    let mut action_scale = args.action_scale as f64;
     for step in (0..args.steps).progress() {
         monitor.add_step();
 
         let obs = results_to_state(&results, device);
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
-            let actions_tensor = p_net.module.forward_ts(&[&obs])?.to(device);
-            let means = actions_tensor.get(0);
-            let scales = actions_tensor.get(1);
+            let means = p_net.module.forward_ts(&[&obs])?.to(device);
+            let scales =
+                tch::Tensor::ones(&means.size(), (tch::Kind::Float, device)) * action_scale;
             let actions = sample(&means, &scales, device);
             Ok(actions)
         })?;
@@ -302,23 +306,17 @@ fn main() -> Result<(), anyhow::Error> {
                     &v_net,
                 );
 
+                let scales = tch::Tensor::ones(
+                    &[args.train_batch_size as i64, ACTION_DIM],
+                    (tch::Kind::Float, device),
+                );
                 for (prev_states, _, actions, _, rewards_to_go, advantages, _) in &batches {
                     // Train policy network
-                    let old_output = p_net_old.module.forward_ts(&[prev_states]).unwrap();
-                    let old_log_probs = action_log_probs_cont(
-                        actions,
-                        &old_output.get(0),
-                        &old_output.get(1),
-                        device,
-                    );
+                    let old_means = p_net_old.module.forward_ts(&[prev_states]).unwrap();
+                    let old_log_probs = action_log_probs_cont(actions, &old_means, &scales, device);
                     p_opt.zero_grad();
-                    let new_output = p_net.module.forward_ts(&[prev_states]).unwrap();
-                    let new_log_probs = action_log_probs_cont(
-                        actions,
-                        &new_output.get(0),
-                        &new_output.get(1),
-                        device,
-                    );
+                    let new_means = p_net.module.forward_ts(&[prev_states]).unwrap();
+                    let new_log_probs = action_log_probs_cont(actions, &new_means, &scales, device);
                     let term1 = (&new_log_probs - &old_log_probs).exp() * advantages;
                     let term2: tch::Tensor = (1.0 + args.epsilon * advantages.sign()) * advantages;
                     let p_loss = -(term1.min_other(&term2).mean(tch::Kind::Float));
@@ -345,6 +343,8 @@ fn main() -> Result<(), anyhow::Error> {
 
             rollout_buffer.clear();
 
+            action_scale -= args.action_scale as f64 / (args.steps / args.rollout_steps) as f64;
+
             // Eval after a certain number of rollouts
             if (step * args.rollout_steps) % args.rollouts_before_eval == 0 {
                 envs.eval_mode();
@@ -354,9 +354,9 @@ fn main() -> Result<(), anyhow::Error> {
                     let mut pred_value = 0.0;
                     for _ in 0..args.max_env_steps {
                         let obs = results_to_state(&results, device);
-                        let actions_tensor = &p_net.module.forward_ts(&[&obs])?;
-                        let actions_tensor =
-                            sample(&actions_tensor.get(0), &actions_tensor.get(1), device);
+                        let means = &p_net.module.forward_ts(&[&obs])?;
+                        let scales = tch::Tensor::ones(&means.size(), (tch::Kind::Float, device));
+                        let actions_tensor = sample(means, &scales, device);
                         let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
                         results = envs.step(&actions, true);
                         avg_reward += results.results.iter().map(|x| x.1).sum::<f32>();
