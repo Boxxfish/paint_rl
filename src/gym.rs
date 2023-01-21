@@ -4,6 +4,9 @@ use rand::Rng;
 /// Minimum L1 distance before env is considered done.
 const DONE_CUTOFF: u64 = 10 * u8::MAX as u64;
 
+/// Thickness of the brush.
+const THICKNESS: i32 = 2;
+
 /// A gym interface for a painting program.
 /// Vectorized by default.
 pub struct PaintGym {
@@ -34,7 +37,128 @@ fn draw_reference(
         let x1 = rng.gen_range(0..canvas_size) as i32;
         let y0 = rng.gen_range(0..canvas_size) as i32;
         let y1 = rng.gen_range(0..canvas_size) as i32;
-        plot_line(x0, x1, y0, y1, references, canvas_offset, canvas_size);
+        plot_thick_line(x0, x1, y0, y1, THICKNESS, references, canvas_offset, canvas_size);
+    }
+}
+
+fn plot_thick_line(
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    thickness: i32,
+    canvases: &mut [(u8, u8, u8)],
+    canvas_offset: usize,
+    canvas_size: u32,
+) {
+    // Handle straight lines
+    if x0 == x1 {
+        let start_y = y0.min(y1);
+        let end_y = y0.max(y1);
+        for y in start_y..end_y {
+            for dx in 0..thickness {
+                plot_line(x0 - dx, x1 - dx, y, y, canvases, canvas_offset, canvas_size);
+                plot_line(x0 + dx, x1 + dx, y, y, canvases, canvas_offset, canvas_size);
+            }
+        }
+    } else if y0 == y1 {
+        let start_x = x0.min(x1);
+        let end_x = x0.max(x1);
+        for x in start_x..end_x {
+            for dy in 0..thickness {
+                plot_line(x, x, y0 - dy, y1 - dy, canvases, canvas_offset, canvas_size);
+                plot_line(x, x, y0 + dy, y1 + dy, canvases, canvas_offset, canvas_size);
+            }
+        }
+    }
+    // Otherwise, handle sloped lines
+    else {
+        // Calculate start and end points of perpendicular line
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let line_len = ((dx.pow(2) + dy.pow(2)) as f32).sqrt();
+        let pdx = -dy as f32 / line_len;
+        let pdy = dx as f32 / line_len;
+        let px0 = (x0 as f32 + pdx * thickness as f32) as i32;
+        let px1 = (x0 as f32 - pdx * thickness as f32) as i32;
+        let py0 = (y0 as f32 + pdy * thickness as f32) as i32;
+        let py1 = (y0 as f32 - pdy * thickness as f32) as i32;
+
+        if (py1 - py0).abs() < (px1 - px0).abs() {
+            if px0 > px1 {
+                plot_thick_line_low(px1, px0, py1, py0, dx, dy, canvases, canvas_offset, canvas_size);
+            } else {
+                plot_thick_line_low(px0, px1, py0, py1, dx, dy, canvases, canvas_offset, canvas_size);
+            }
+        } else if py0 > py1 {
+            plot_thick_line_high(px1, px0, py1, py0, dx, dy, canvases, canvas_offset, canvas_size);
+        } else {
+            plot_thick_line_high(px0, px1, py0, py1, dx, dy, canvases, canvas_offset, canvas_size);
+        }
+    }
+}
+
+fn plot_thick_line_low(
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    ldx: i32,
+    ldy: i32,
+    canvases: &mut [(u8, u8, u8)],
+    canvas_offset: usize,
+    canvas_size: u32,
+) {
+    let dx = x1 - x0;
+    let mut dy = y1 - y0;
+    let mut y = y0;
+    let mut yi = 1;
+    if dy < 0 {
+        yi = -1;
+        dy = -dy;
+    }
+    let mut d = 2 * dy - dx;
+
+    for x in x0..x1 {
+        plot_line(x, x + ldx, y, y + ldy, canvases, canvas_offset, canvas_size);
+        if d > 0 {
+            y += yi;
+            d += 2 * (dy - dx);
+        } else {
+            d += 2 * dy;
+        }
+    }
+}
+
+fn plot_thick_line_high(
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+    ldx: i32,
+    ldy: i32,
+    canvases: &mut [(u8, u8, u8)],
+    canvas_offset: usize,
+    canvas_size: u32,
+) {
+    let mut dx = x1 - x0;
+    let dy = y1 - y0;
+    let mut x = x0;
+    let mut xi = 1;
+    if dx < 0 {
+        xi = -1;
+        dx = -dx;
+    }
+    let mut d = 2 * dx - dy;
+
+    for y in y0..y1 {
+        plot_line(x, x + ldx,y, y + ldy, canvases, canvas_offset, canvas_size);
+        if d > 0 {
+            x += xi;
+            d += 2 * (dx - dy);
+        } else {
+            d += 2 * dx;
+        }
     }
 }
 
@@ -47,6 +171,12 @@ fn plot_line(
     canvas_offset: usize,
     canvas_size: u32,
 ) {
+    // Clip points so they're always on the canvas
+    let x0 = x0.clamp(0, canvas_size as i32 - 1);
+    let x1 = x1.clamp(0, canvas_size as i32 - 1);
+    let y0 = y0.clamp(0, canvas_size as i32 - 1);
+    let y1 = y1.clamp(0, canvas_size as i32 - 1);
+
     // Handle straight lines
     if x0 == x1 {
         let start_y = y0.min(y1);
@@ -233,11 +363,12 @@ impl PaintGym {
         for (env_id, action) in actions.iter().enumerate() {
             let canvas_offset = env_id * (self.canvas_size * self.canvas_size) as usize;
 
-            plot_line(
+            plot_thick_line(
                 action.start.x as i32,
                 action.end.x as i32,
                 action.start.y as i32,
                 action.end.y as i32,
+                THICKNESS,
                 &mut self.canvases,
                 canvas_offset,
                 self.canvas_size,

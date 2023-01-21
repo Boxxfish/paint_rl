@@ -67,7 +67,7 @@ struct Args {
 }
 
 // Canvas and reference pixels
-const IMG_SIZE: i64 = 128;
+const IMG_SIZE: i64 = 64;
 const IMG_CHANNELS: i64 = 6;
 // Start (x, y), end (x, y)
 const ACTION_DIM: i64 = 4;

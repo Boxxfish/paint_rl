@@ -108,18 +108,19 @@ impl RolloutBuffer {
             .unwrap()
             .squeeze();
         let mut step_advantages = tch::Tensor::zeros(&[self.num_envs as i64], tensor_opts);
+        let mut state_values = tch::Tensor::zeros(&[self.num_envs as i64], (tch::Kind::Float, self.device));
         for i in (0..self.num_steps).rev() {
             let prev_states = self.prev_states.get(i as _);
-            let states = self.states.get(i as _);
+            // let states = self.states.get(i as _);
             let rewards = self.rewards.get(i as _);
             let inv_dones = 1.0 - self.dones.get(i as _);
             let prev_state_values = v_net.module.forward_ts(&[prev_states]).unwrap().squeeze();
-            let state_values = v_net.module.forward_ts(&[&states]).unwrap().squeeze();
-            let delta = &rewards + discount * &inv_dones * state_values - prev_state_values;
+            let delta = &rewards + discount * &inv_dones * state_values - &prev_state_values;
             step_rewards_to_go = rewards + discount * step_rewards_to_go * &inv_dones;
             rewards_to_go.get(i as _).copy_(&step_rewards_to_go);
             step_advantages = delta + discount * lambda * step_advantages * inv_dones;
             advantages.get(i as _).copy_(&step_advantages);
+            state_values = prev_state_values.copy();
         }
         let exp_count = self.num_envs * self.num_steps;
         let indices = tch::Tensor::randperm(exp_count as i64, (tch::Kind::Int, self.device));
