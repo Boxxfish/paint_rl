@@ -37,10 +37,20 @@ fn draw_reference(
         let x1 = rng.gen_range(0..canvas_size) as i32;
         let y0 = rng.gen_range(0..canvas_size) as i32;
         let y1 = rng.gen_range(0..canvas_size) as i32;
-        plot_thick_line(x0, x1, y0, y1, THICKNESS, references, canvas_offset, canvas_size);
+        plot_thick_line(
+            x0,
+            x1,
+            y0,
+            y1,
+            THICKNESS,
+            references,
+            canvas_offset,
+            canvas_size,
+        );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plot_thick_line(
     x0: i32,
     x1: i32,
@@ -86,18 +96,59 @@ fn plot_thick_line(
 
         if (py1 - py0).abs() < (px1 - px0).abs() {
             if px0 > px1 {
-                plot_thick_line_low(px1, px0, py1, py0, dx, dy, canvases, canvas_offset, canvas_size);
+                plot_thick_line_low(
+                    px1,
+                    px0,
+                    py1,
+                    py0,
+                    dx,
+                    dy,
+                    canvases,
+                    canvas_offset,
+                    canvas_size,
+                );
             } else {
-                plot_thick_line_low(px0, px1, py0, py1, dx, dy, canvases, canvas_offset, canvas_size);
+                plot_thick_line_low(
+                    px0,
+                    px1,
+                    py0,
+                    py1,
+                    dx,
+                    dy,
+                    canvases,
+                    canvas_offset,
+                    canvas_size,
+                );
             }
         } else if py0 > py1 {
-            plot_thick_line_high(px1, px0, py1, py0, dx, dy, canvases, canvas_offset, canvas_size);
+            plot_thick_line_high(
+                px1,
+                px0,
+                py1,
+                py0,
+                dx,
+                dy,
+                canvases,
+                canvas_offset,
+                canvas_size,
+            );
         } else {
-            plot_thick_line_high(px0, px1, py0, py1, dx, dy, canvases, canvas_offset, canvas_size);
+            plot_thick_line_high(
+                px0,
+                px1,
+                py0,
+                py1,
+                dx,
+                dy,
+                canvases,
+                canvas_offset,
+                canvas_size,
+            );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plot_thick_line_low(
     x0: i32,
     x1: i32,
@@ -130,6 +181,7 @@ fn plot_thick_line_low(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plot_thick_line_high(
     x0: i32,
     x1: i32,
@@ -152,7 +204,7 @@ fn plot_thick_line_high(
     let mut d = 2 * dx - dy;
 
     for y in y0..y1 {
-        plot_line(x, x + ldx,y, y + ldy, canvases, canvas_offset, canvas_size);
+        plot_line(x, x + ldx, y, y + ldy, canvases, canvas_offset, canvas_size);
         if d > 0 {
             x += xi;
             d += 2 * (dx - dy);

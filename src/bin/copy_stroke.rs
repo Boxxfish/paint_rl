@@ -268,11 +268,9 @@ fn main() -> Result<(), anyhow::Error> {
         })?;
         let actions = tensor_to_actions(&actions_tensor.clip(0.0, 1.0));
 
-        let prev_state = obs.copy();
         results = envs.step(&actions, false);
         rollout_buffer.insert_step(
-            &prev_state,
-            &results_to_state(&results, device),
+            &obs,
             &actions_tensor,
             &results.results.iter().map(|r| r.1).collect::<Vec<_>>(),
             &results.results.iter().map(|r| r.2).collect::<Vec<_>>(),
@@ -284,6 +282,10 @@ fn main() -> Result<(), anyhow::Error> {
 
         if step % args.rollout_steps == 0 {
             envs.do_bg_work();
+
+            // Add final observation
+            rollout_buffer.insert_final_step(&results_to_state(&results, device));
+
             // Train networks
             p_net.module.set_train();
             v_net.module.set_train();

@@ -4,7 +4,6 @@ use crate::model_utils::TrainableModel;
 /// Also computes advantage estimates.
 pub struct RolloutBuffer {
     // The shape of each element is [num_steps, num_envs, element_shape].
-    pub prev_states: tch::Tensor,
     pub states: tch::Tensor,
     pub actions: tch::Tensor,
     pub rewards: tch::Tensor,
@@ -28,7 +27,7 @@ impl RolloutBuffer {
         let k = tch::Kind::Float;
         let num_envs_i64 = num_envs as i64;
         let num_steps_i64 = num_steps as i64;
-        let mut state_shape_vec = vec![num_steps_i64, num_envs_i64];
+        let mut state_shape_vec = vec![num_steps_i64 + 1, num_envs_i64];
         state_shape_vec.extend_from_slice(state_shape);
         let mut action_shape_vec = vec![num_steps_i64, num_envs_i64];
         action_shape_vec.extend_from_slice(action_shape);
@@ -36,7 +35,6 @@ impl RolloutBuffer {
             num_envs,
             num_steps,
             next: 0,
-            prev_states: tch::Tensor::zeros(&state_shape_vec, (k, device)).requires_grad_(false),
             states: tch::Tensor::zeros(&state_shape_vec, (k, device)).requires_grad_(false),
             actions: tch::Tensor::zeros(&action_shape_vec, (action_dtype, device))
                 .requires_grad_(false),
@@ -50,16 +48,16 @@ impl RolloutBuffer {
 
     /// Inserts a transition from each environment into the buffer.
     /// Make sure more data than steps aren't inserted.
+    /// Insert the state that was observed PRIOR to performing the action.
+    /// The final state returned will be inserted using `insert_final_step`.
     pub fn insert_step(
         &mut self,
-        prev_states: &tch::Tensor,
         states: &tch::Tensor,
         actions: &tch::Tensor,
         rewards: &[f32],
         dones: &[bool],
     ) {
         tch::no_grad(|| {
-            self.prev_states.get(self.next as _).copy_(prev_states);
             self.states.get(self.next as _).copy_(states);
             self.actions.get(self.next as _).copy_(actions);
             self.rewards
@@ -72,6 +70,13 @@ impl RolloutBuffer {
             );
         });
         self.next += 1;
+    }
+
+    /// Inserts the final observation observed.
+    pub fn insert_final_step(&mut self, states: &tch::Tensor) {
+        tch::no_grad(|| {
+            self.states.get(self.next as _).copy_(states);
+        });
     }
 
     /// Generates minibatches of experience, incorporating advantage estimates.
@@ -104,14 +109,13 @@ impl RolloutBuffer {
                 .requires_grad_(false);
         let mut step_rewards_to_go = v_net
             .module
-            .forward_ts(&[&self.states.get(self.states.size()[0] - 1)])
+            .forward_ts(&[&self.states.get(self.next as _)])
             .unwrap()
             .squeeze();
+        let mut state_values = step_rewards_to_go.copy();
         let mut step_advantages = tch::Tensor::zeros(&[self.num_envs as i64], tensor_opts);
-        let mut state_values = tch::Tensor::zeros(&[self.num_envs as i64], (tch::Kind::Float, self.device));
         for i in (0..self.num_steps).rev() {
-            let prev_states = self.prev_states.get(i as _);
-            // let states = self.states.get(i as _);
+            let prev_states = self.states.get(i as _);
             let rewards = self.rewards.get(i as _);
             let inv_dones = 1.0 - self.dones.get(i as _);
             let prev_state_values = v_net.module.forward_ts(&[prev_states]).unwrap().squeeze();
@@ -120,17 +124,17 @@ impl RolloutBuffer {
             rewards_to_go.get(i as _).copy_(&step_rewards_to_go);
             step_advantages = delta + discount * lambda * step_advantages * inv_dones;
             advantages.get(i as _).copy_(&step_advantages);
-            state_values = prev_state_values.copy();
+            state_values = prev_state_values;
         }
         let exp_count = self.num_envs * self.num_steps;
         let indices = tch::Tensor::randperm(exp_count as i64, (tch::Kind::Int, self.device));
-        let rand_prev_states = self.prev_states.flatten(0, 1).index_select(0, &indices);
-        let rand_states = self.states.flatten(0, 1).index_select(0, &indices);
+        let rand_prev_states = self.states.flatten(0, 1).index_select(0, &indices);
         let rand_actions = self.actions.flatten(0, 1).index_select(0, &indices);
         let rand_rewards = self.rewards.flatten(0, 1).index_select(0, &indices);
         let rand_rewards_to_go = rewards_to_go.flatten(0, 1).index_select(0, &indices);
         let rand_advantages = advantages.flatten(0, 1).index_select(0, &indices);
         let rand_dones = self.dones.flatten(0, 1).index_select(0, &indices);
+        let rand_states = self.states.flatten(0, 1).index_select(0, &(indices + 1));
         let batch_count = exp_count as u32 / batch_size;
         let mut batches = Vec::new();
         for i in 0..batch_count {

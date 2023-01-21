@@ -1,8 +1,12 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use pyo3::{Python, pyclass};
+use pyo3::{pyclass, Python};
 use rand::prelude::*;
 
-use paint_gym::{gym::*, rollout_buffer::RolloutBuffer, model_utils::{prep_py, export_model, cleanup_py, TrainableModel}};
+use paint_gym::{
+    gym::*,
+    model_utils::{cleanup_py, export_model, prep_py, TrainableModel},
+    rollout_buffer::RolloutBuffer,
+};
 
 const OBS_SIZE: i64 = 256 * 256 * 3;
 const ACTION_SIZE: i64 = 4;
@@ -13,16 +17,22 @@ fn run_rollout_buffer(env_count: usize, v_net: &TrainableModel) {
     let device = tch::Device::Cpu;
     #[allow(unused_variables)]
     let guard = tch::no_grad_guard();
-    let mut buffer = RolloutBuffer::new(&[OBS_SIZE], &[ACTION_SIZE], tch::Kind::Float, env_count, ROLLOUT_STEPS, device);
-    
-    let mut prev_states = tch::Tensor::rand(&[OBS_SIZE], (tch::Kind::Float, device));
+    let mut buffer = RolloutBuffer::new(
+        &[OBS_SIZE],
+        &[ACTION_SIZE],
+        tch::Kind::Float,
+        env_count,
+        ROLLOUT_STEPS,
+        device,
+    );
+
     for _ in 0..ROLLOUT_STEPS {
         let states = tch::Tensor::rand(&[env_count as i64, OBS_SIZE], (tch::Kind::Float, device));
-        let actions = tch::Tensor::rand(&[env_count as i64, ACTION_SIZE], (tch::Kind::Float, device));
+        let actions =
+            tch::Tensor::rand(&[env_count as i64, ACTION_SIZE], (tch::Kind::Float, device));
         let rewards: Vec<_> = (0..env_count).map(|_| rng.gen()).collect();
         let dones: Vec<_> = (0..env_count).map(|_| rng.gen()).collect();
-        buffer.insert_step(&prev_states, &states, &actions, &rewards, &dones);
-        prev_states = states.copy();
+        buffer.insert_step(&states, &actions, &rewards, &dones);
     }
 
     #[allow(unused_variables)]
@@ -76,10 +86,7 @@ fn rollout_buffer_bench(c: &mut Criterion) {
             "bench_models",
             "VNet",
             VNetParams { obs_size: OBS_SIZE },
-            &[&[
-                batch_size,
-                OBS_SIZE as u32,
-            ]],
+            &[&[batch_size, OBS_SIZE as u32]],
             false,
         );
     });
@@ -89,9 +96,7 @@ fn rollout_buffer_bench(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("rollout_buffer");
     group.sample_size(30);
-    group.bench_function("envs: 32", |b| {
-        b.iter(|| run_rollout_buffer(32, &v_net))
-    });
+    group.bench_function("envs: 32", |b| b.iter(|| run_rollout_buffer(32, &v_net)));
 }
 
 fn copy_stroke_bench(c: &mut Criterion) {
