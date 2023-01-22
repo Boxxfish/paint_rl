@@ -102,6 +102,9 @@ fn rollout_buffer_bench(c: &mut Criterion) {
 fn copy_stroke_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("copy_stroke");
     group.sample_size(10);
+    group.bench_function("envs: 1, inference time: 0.0s, train time: 0.0s", |b| {
+        b.iter(|| run_copy_stroke(1, 0, 0))
+    });
     group.bench_function("envs: 1, inference time: 0.02s, train time: 0.1s", |b| {
         b.iter(|| run_copy_stroke(1, 20, 100))
     });
