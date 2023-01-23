@@ -24,7 +24,7 @@ Second pass (Get agent working on environment):
 - [x] Anneal standard deviation of brush stroke positions over time.
 
 Third pass (Get cloud training working):
-- [ ] Integrate cloud logging service for monitor.
+- [x] Integrate cloud logging service for monitor.
 - [ ] Integrate cloud logging service for Optuna.
 - [ ] Create docker container for repo.
 - [ ] Set up linting in CI (clippy, rustfmt, black, mypy).

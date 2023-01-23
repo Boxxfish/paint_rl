@@ -21,7 +21,7 @@ default:
 
 # Run tuner.
 @tune NAME OBJECTIVE TRIALS *ARGS:
-   RUSTFLAGS="-C target-cpu=native" python models/tune.py --name {{NAME}} --objective {{OBJECTIVE}} --trials {{TRIALS}} -- {{ARGS}}
+   RUSTFLAGS="-C target-cpu=native" python python/tune.py --name {{NAME}} --objective {{OBJECTIVE}} --trials {{TRIALS}} -- {{ARGS}}
 
 # Perform linting and formatting.
 @lint:

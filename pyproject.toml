@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Models for use in Paint RL."
 authors = ["Ben Giacalone <bensgiacalone@gmail.com>"]
 readme = "README.md"
-packages = [{include = "models"}]
+packages = [{include = "python"}]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.11"
@@ -13,6 +13,7 @@ torchvision = "^0.14.1"
 torchaudio = "^0.13.1"
 rich = "^13.0.0"
 optuna = "^3.0.5"
+wandb = "^0.13.9"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "^0.991"

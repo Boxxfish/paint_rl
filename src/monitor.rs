@@ -5,8 +5,45 @@ use plotters::{
     series::LineSeries,
     style::{RED, WHITE},
 };
+use pyo3::Python;
 
 pub type MetricID = usize;
+
+/// Parameters for the plotters backend.
+pub struct PlottersParams {
+    pub output_path: String,
+}
+
+/// Parameters for the Weights and Biases backend.
+pub struct WandbParams {
+    pub project: String,
+}
+
+/// Parameters for a given backend.
+pub enum BackendParams {
+    Plotters(PlottersParams),
+    Wandb(WandbParams),
+}
+
+/// State for the plotters backend.
+#[derive(Clone)]
+pub struct PlottersData {
+    output_path: String,
+}
+
+/// State for the Weights and Biases backend.
+#[derive(Clone)]
+pub struct WandbData {
+    pub project: String,
+    run: Option<pyo3::PyObject>,
+}
+
+/// Data for a backend.
+#[derive(Clone)]
+pub enum BackendData {
+    Plotters(PlottersData),
+    Wandb(WandbData),
+}
 
 /// Type of message sent to the BG thread.
 #[derive(Clone)]
@@ -25,12 +62,22 @@ pub struct Monitor {
     pub current_step: u32,
     pub metrics: HashMap<usize, String>,
     pub metric_count: usize,
-    pub output_path: String,
+    pub backend_data: BackendData,
 }
 
 impl Monitor {
     /// Constructs a new monitor.
-    pub fn new(plot_every: u32, output_path: &str) -> Self {
+    pub fn new(plot_every: u32, backend_params: BackendParams) -> Self {
+        let backend_data = match backend_params {
+            BackendParams::Plotters(params) => BackendData::Plotters(PlottersData {
+                output_path: params.output_path,
+            }),
+            BackendParams::Wandb(params) => BackendData::Wandb(WandbData {
+                project: params.project,
+                run: None,
+            }),
+        };
+
         Self {
             plot_every,
             bg_work_handle: None,
@@ -39,7 +86,7 @@ impl Monitor {
             current_step: 0,
             metrics: HashMap::new(),
             metric_count: 0,
-            output_path: output_path.to_string(),
+            backend_data,
         }
     }
 
@@ -80,65 +127,107 @@ impl Monitor {
     /// The background thread performs plotting and saving.
     pub fn init(&mut self) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let output_path = self.output_path.clone();
         let graph_width = 600;
         let graph_height = 480;
         let graph_count = self.metric_count as u32;
         let metrics = self.metrics.clone();
+        let backend_data = match &self.backend_data {
+            BackendData::Wandb(params) => {
+                let run = Python::with_gil(|py| {
+                    let wandb = py.import("python.wandb").unwrap();
+                    Some(
+                        wandb
+                            .call_method1("start_run", (&params.project,))
+                            .unwrap()
+                            .into(),
+                    )
+                });
+                BackendData::Wandb(WandbData {
+                    project: params.project.clone(),
+                    run,
+                })
+            }
+            _ => self.backend_data.clone(),
+        };
+        self.backend_data = backend_data.clone();
         let handle = std::thread::spawn(move || {
             let mut rows: Vec<Vec<Option<f32>>> = Vec::new();
             loop {
                 let incoming: ThreadMsg = rx.recv().unwrap();
-                match incoming {
-                    ThreadMsg::Data(data) => rows.extend(data),
+                let new_data = match incoming {
+                    ThreadMsg::Data(data) => {
+                        rows.extend(data.clone());
+                        data
+                    }
                     ThreadMsg::Stop => break rows,
-                }
+                };
 
                 if rows.is_empty() {
                     continue;
                 }
 
-                // Plot data.
-                // Steps are used as the X axis, with various metrics on the Y axis.
-                let root =
-                    BitMapBackend::new(&output_path, (graph_width, graph_height * graph_count))
+                // Use backend to display data
+                match &backend_data {
+                    BackendData::Plotters(data) => {
+                        // Steps are used as the X axis, with various metrics on the Y axis.
+                        let root = BitMapBackend::new(
+                            &data.output_path,
+                            (graph_width, graph_height * graph_count),
+                        )
                         .into_drawing_area();
-                root.fill(&WHITE).unwrap();
-                let areas = root.split_evenly((graph_count as usize, 1));
-                for (metric_index, area) in areas.iter().enumerate() {
-                    let metric_name = metrics.get(&metric_index).unwrap();
-                    let metric_values = rows
-                        .iter()
-                        .map(|row| row[metric_index])
-                        .enumerate()
-                        .filter(|(_, val)| val.is_some())
-                        .map(|(i, val)| (i, val.unwrap()))
-                        .collect::<Vec<(usize, f32)>>();
-                    if !metric_values.is_empty() {
-                        let min_range = metric_values
-                            .iter()
-                            .min_by(|x, y| x.1.total_cmp(&y.1))
-                            .unwrap()
-                            .1;
-                        let max_range = metric_values
-                            .iter()
-                            .max_by(|x, y| x.1.total_cmp(&y.1))
-                            .unwrap()
-                            .1;
-                        let mut chart = ChartBuilder::on(area)
-                            .margin(20)
-                            .x_label_area_size(30)
-                            .y_label_area_size(30)
-                            .caption(metric_name, ("sans-serif", 32))
-                            .build_cartesian_2d(0..rows.len(), min_range..max_range)
-                            .unwrap();
-                        chart.configure_mesh().draw().unwrap();
-                        chart
-                            .draw_series(LineSeries::new(metric_values, RED))
-                            .unwrap();
+                        root.fill(&WHITE).unwrap();
+                        let areas = root.split_evenly((graph_count as usize, 1));
+                        for (metric_index, area) in areas.iter().enumerate() {
+                            let metric_name = metrics.get(&metric_index).unwrap();
+                            let metric_values = rows
+                                .iter()
+                                .map(|row| row[metric_index])
+                                .enumerate()
+                                .filter(|(_, val)| val.is_some())
+                                .map(|(i, val)| (i, val.unwrap()))
+                                .collect::<Vec<(usize, f32)>>();
+                            if !metric_values.is_empty() {
+                                let min_range = metric_values
+                                    .iter()
+                                    .min_by(|x, y| x.1.total_cmp(&y.1))
+                                    .unwrap()
+                                    .1;
+                                let max_range = metric_values
+                                    .iter()
+                                    .max_by(|x, y| x.1.total_cmp(&y.1))
+                                    .unwrap()
+                                    .1;
+                                let mut chart = ChartBuilder::on(area)
+                                    .margin(20)
+                                    .x_label_area_size(30)
+                                    .y_label_area_size(30)
+                                    .caption(metric_name, ("sans-serif", 32))
+                                    .build_cartesian_2d(0..rows.len(), min_range..max_range)
+                                    .unwrap();
+                                chart.configure_mesh().draw().unwrap();
+                                chart
+                                    .draw_series(LineSeries::new(metric_values, RED))
+                                    .unwrap();
+                            }
+                        }
+                        root.present().unwrap();
+                    }
+                    BackendData::Wandb(data) => {
+                        Python::with_gil(|py| {
+                            let wandb = py.import("python.wandb").unwrap();
+                            let mut values = HashMap::new();
+                            for (&metric_id, metric_name) in &metrics {
+                                values.insert(metric_name.to_owned(), new_data[metric_id].clone());
+                            }
+                            wandb
+                                .call_method1(
+                                    "log",
+                                    (data.run.as_ref().unwrap(), values, new_data[0].len()),
+                                )
+                                .unwrap();
+                        });
                     }
                 }
-                root.present().unwrap();
             }
         });
 
@@ -150,6 +239,16 @@ impl Monitor {
     pub fn stop(self) {
         self.data_tx.unwrap().send(ThreadMsg::Stop).unwrap();
         let rows = self.bg_work_handle.unwrap().join().unwrap();
+
+        if let BackendData::Wandb(data) = self.backend_data {
+            Python::with_gil(|py| {
+                let wandb = py.import("python.wandb").unwrap();
+                wandb
+                    .call_method1("finish_run", (data.run.as_ref().unwrap(),))
+                    .unwrap();
+            });
+        }
+
         for (&index, name) in &self.metrics {
             let mut vals: Vec<f32> = rows.iter().filter_map(|row| row[index]).collect();
             // Use average of the last 5 values

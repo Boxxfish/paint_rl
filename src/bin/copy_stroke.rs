@@ -8,7 +8,7 @@ use indicatif::ProgressIterator;
 
 use paint_gym::gym::{PaintAction, PaintGym, PaintStepResult, Pixel};
 use paint_gym::model_utils::{cleanup_py, export_model, prep_py, TrainableModel};
-use paint_gym::monitor::Monitor;
+use paint_gym::monitor::{BackendParams, Monitor, WandbParams};
 use paint_gym::rollout_buffer::RolloutBuffer;
 
 use pyo3::prelude::*;
@@ -74,7 +74,6 @@ const IMG_SIZE: i64 = 32;
 const IMG_CHANNELS: i64 = 6;
 // Start (x, y), end (x, y)
 const ACTION_DIM: i64 = 4;
-const AVG_REWARD_OUTPUT: &str = "temp/avg_rewards.png";
 
 #[pyclass]
 struct VNetParams {
@@ -187,17 +186,9 @@ fn main() -> Result<(), anyhow::Error> {
         tch::Device::Cpu
     };
 
-    // Plotting stuff
-    let mut monitor = Monitor::new(500, AVG_REWARD_OUTPUT);
-    let eval_reward_metric = monitor.add_metric("eval_reward");
-    let v_loss_metric = monitor.add_metric("v_loss");
-    let p_loss_metric = monitor.add_metric("p_loss");
-    let avg_reward_metric = monitor.add_metric("avg_reward");
-    let pred_value_metric = monitor.add_metric("pred_value");
-    monitor.init();
-
     // Load models
     pyo3::prepare_freethreaded_python();
+    cleanup_py();
     Python::with_gil(|py| {
         prep_py(py);
         let batch_size = 10;
@@ -231,7 +222,6 @@ fn main() -> Result<(), anyhow::Error> {
             args.cuda,
         );
     });
-    cleanup_py();
 
     let (v_path, p_path) = if args.cont {
         ("temp/VNet.pt", "temp/PNet.pt")
@@ -242,6 +232,20 @@ fn main() -> Result<(), anyhow::Error> {
     let (mut p_net, mut p_net_old) = TrainableModel::load2(p_path, device);
     let mut v_opt = tch::nn::Adam::default().build(&v_net.vs, args.v_lr)?;
     let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, args.p_lr)?;
+
+    // Plotting stuff
+    let mut monitor = Monitor::new(
+        500,
+        BackendParams::Wandb(WandbParams {
+            project: "paint-rl".to_string(),
+        }),
+    );
+    let eval_reward_metric = monitor.add_metric("eval_reward");
+    let v_loss_metric = monitor.add_metric("v_loss");
+    let p_loss_metric = monitor.add_metric("p_loss");
+    let avg_reward_metric = monitor.add_metric("avg_reward");
+    let pred_value_metric = monitor.add_metric("pred_value");
+    monitor.init();
 
     let (mut envs, mut results) = PaintGym::init(
         args.env_count as u32,

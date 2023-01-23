@@ -2,6 +2,7 @@
 /target
 
 # ML artifacts and config
+/wandb
 */__pycache__
 /temp
 *.ptc

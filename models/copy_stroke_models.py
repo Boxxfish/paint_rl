@@ -4,7 +4,7 @@ Models for copy stroke environment.
 
 import torch
 
-from models.model_utils import get_img_size, init_orthogonal
+from python.model_utils import get_img_size, init_orthogonal
 
 class VNet(torch.nn.Module):
     def __init__(self, img_size: int):

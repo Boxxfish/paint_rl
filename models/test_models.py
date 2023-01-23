@@ -4,7 +4,7 @@ Models for testing PPO.
 
 import torch
 
-from models.model_utils import init_orthogonal
+from python.model_utils import init_orthogonal
 
 
 class VNet(torch.nn.Module):

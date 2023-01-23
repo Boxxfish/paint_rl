@@ -74,7 +74,7 @@ pub fn export_model(
     input_shapes: &[&[u32]],
     cuda: bool,
 ) {
-    let model_utils = py_unwrap(py, py.import("models.model_utils"));
+    let model_utils = py_unwrap(py, py.import("python.model_utils"));
     py_unwrap(
         py,
         model_utils.call_method1(
