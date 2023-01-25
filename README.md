@@ -25,7 +25,7 @@ Second pass (Get agent working on environment):
 
 Third pass (Get cloud training working):
 - [x] Integrate cloud logging service for monitor.
-- [ ] Integrate cloud logging service for Optuna.
+- [x] Integrate cloud logging service for Optuna.
 - [ ] Create docker container for repo.
 - [ ] Set up linting in CI (clippy, rustfmt, black, mypy).
 - [ ] Set up docker container building and uploading on `main`.

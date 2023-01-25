@@ -2,13 +2,14 @@
 Utilities for working with Weights and Biases.
 """
 
+from typing import Dict
 import wandb
 
-def start_run(project: str):
+def start_run(project: str, config: Dict[str, float]):
     """
     Begins logging a new run.
     """
-    run = wandb.init(project=project)
+    run = wandb.init(project=project, config=config)
     if run is None:
         raise RuntimeError("wandb.init did not return valid run object")
     return run

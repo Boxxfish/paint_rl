@@ -4,31 +4,35 @@ Optuna uses the arguments sent to an experiment to tune hyperparameters,
 and uses the values returned to compute a loss to optimize.
 """
 
+from typing import Tuple
 import optuna
+from optuna.integration.wandb import WeightsAndBiasesCallback
 import importlib
 from collections.abc import Callable
 from argparse import ArgumentParser
 import subprocess
 import re
 
-def run_experiment(name: str, params: dict[str, float | int]) -> dict[str, float]:
+import wandb
+
+def run_experiment(name: str, params: dict[str, float | int]) -> Tuple[dict[str, float], str]:
     """
     Runs an experiment, passing the given params to the program.
-    Returns a dict of final metrics.
+    Returns a dict of final metrics and the output, in case an error is raised.
     """
     cmd = ["cargo", "run", "--bin", name, "--release", "--"]
     for param_name in params:
         cmd.append("--" + param_name)
         cmd.append(str(params[param_name]))
-    output = subprocess.run(cmd, capture_output=True)
+    output = subprocess.run(cmd, capture_output=True).stdout.decode("UTF8")
     r = re.compile("[A-z]\\S+: -?\\d*\\.?\\d*")
-    metrics = r.findall(output.stdout.decode("UTF8"))
+    metrics = r.findall(output)
     final_metrics = {}
     for metric in metrics:
         metric_name = metric.split(": ")[0]
         metric_val = float(metric.split(": ")[1])
         final_metrics[metric_name] = metric_val
-    return final_metrics
+    return final_metrics, output
 
 def create_obj_wrapper(experiment_name: str, params: dict[str, float | int], obj_func: Callable[[dict[str, float]], float]) -> Callable[[optuna.Trial], float]:
     """
@@ -48,12 +52,17 @@ def create_obj_wrapper(experiment_name: str, params: dict[str, float | int], obj
             # Any parameters without "__" should be passed in like normal
             if "__" not in param_key:
                 param_dict[param_key] = params[param_key]
-        metrics = run_experiment(experiment_name, param_dict)
-        return obj_func(metrics)
+        metrics, output = run_experiment(experiment_name, param_dict)
+        try:
+            return obj_func(metrics)
+        except Exception as e:
+            raise RuntimeError(f"""An error was raised while evaluating the objective function.
+Error raised: {e}
+Experiment output: {output}""")
     return new_obj_func
     
 
-def run_study(name: str, objective_func: str, params: dict[str, float], trials: int):
+def run_study(name: str, objective_func: str, params: dict[str, float], trials: int, wandb_project: str | None = None):
     """
     Runs a study.
     Objective function should be passed in as "file_name.func_name".
@@ -62,12 +71,16 @@ def run_study(name: str, objective_func: str, params: dict[str, float], trials: 
     If the params "param__min" and "param__max" are given, the tuner will use that as
     the range.
     """
-    study = optuna.create_study()
+    pruner = optuna.pruners.MedianPruner()
+    study = optuna.create_study(pruner=pruner)
     module = objective_func.split(".")[0]
     func_name = objective_func.split(".")[1]
-    objective = getattr(importlib.import_module(module), func_name)
+    objective = getattr(importlib.import_module("models." + module), func_name)
     obj_wrapper = create_obj_wrapper(name, params, objective)
-    study.optimize(obj_wrapper, n_trials=trials)
+    callbacks = []
+    if wandb_project:
+        callbacks.append(WeightsAndBiasesCallback(metric_name=func_name, wandb_kwargs={"project": wandb_project, "name": f"{name}-tune"}))
+    study.optimize(obj_wrapper, n_trials=trials, n_jobs=1, callbacks=callbacks)
     print(study.best_params)
 
 
@@ -76,6 +89,7 @@ if __name__ == "__main__":
     parser.add_argument("--name", required=True)
     parser.add_argument("--objective", required=True)
     parser.add_argument("--trials", required=True)
+    parser.add_argument("--wandb-project", required=False)
     args, params = parser.parse_known_args()
     params.pop(0)
     params_dict = {}
@@ -84,4 +98,4 @@ if __name__ == "__main__":
         param_val_str = params[i * 2 + 1]
         param_val = float(param_val_str) if "." in param_val_str else int(param_val_str)
         params_dict[param_name] = param_val
-    run_study(args.name, args.objective, params_dict, int(args.trials)) # type: ignore
+    run_study(args.name, args.objective, params_dict, int(args.trials), wandb_project=args.wandb_project) # type: ignore

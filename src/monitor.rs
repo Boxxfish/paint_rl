@@ -5,7 +5,7 @@ use plotters::{
     series::LineSeries,
     style::{RED, WHITE},
 };
-use pyo3::Python;
+use pyo3::{types::IntoPyDict, Python};
 
 pub type MetricID = usize;
 
@@ -17,6 +17,7 @@ pub struct PlottersParams {
 /// Parameters for the Weights and Biases backend.
 pub struct WandbParams {
     pub project: String,
+    pub config: HashMap<String, f32>,
 }
 
 /// Parameters for a given backend.
@@ -35,6 +36,7 @@ pub struct PlottersData {
 #[derive(Clone)]
 pub struct WandbData {
     pub project: String,
+    config: HashMap<String, f32>,
     run: Option<pyo3::PyObject>,
 }
 
@@ -75,6 +77,7 @@ impl Monitor {
             BackendParams::Wandb(params) => BackendData::Wandb(WandbData {
                 project: params.project,
                 run: None,
+                config: params.config,
             }),
         };
 
@@ -134,10 +137,13 @@ impl Monitor {
         let backend_data = match &self.backend_data {
             BackendData::Wandb(params) => {
                 let run = Python::with_gil(|py| {
-                    let wandb = py.import("python.wandb").unwrap();
+                    let wandb = py.import("python.wandb_utils").unwrap();
                     Some(
                         wandb
-                            .call_method1("start_run", (&params.project,))
+                            .call_method1(
+                                "start_run",
+                                (&params.project, params.config.clone().into_py_dict(py)),
+                            )
                             .unwrap()
                             .into(),
                     )
@@ -145,6 +151,7 @@ impl Monitor {
                 BackendData::Wandb(WandbData {
                     project: params.project.clone(),
                     run,
+                    config: params.config.clone(),
                 })
             }
             _ => self.backend_data.clone(),
@@ -214,15 +221,19 @@ impl Monitor {
                     }
                     BackendData::Wandb(data) => {
                         Python::with_gil(|py| {
-                            let wandb = py.import("python.wandb").unwrap();
+                            let wandb = py.import("python.wandb_utils").unwrap();
                             let mut values = HashMap::new();
                             for (&metric_id, metric_name) in &metrics {
-                                values.insert(metric_name.to_owned(), new_data[metric_id].clone());
+                                let mut metric_values = Vec::new();
+                                for new_data_row in &new_data {
+                                    metric_values.push(new_data_row[metric_id]);
+                                }
+                                values.insert(metric_name.to_owned(), metric_values);
                             }
                             wandb
                                 .call_method1(
                                     "log",
-                                    (data.run.as_ref().unwrap(), values, new_data[0].len()),
+                                    (data.run.as_ref().unwrap(), values, new_data.len()),
                                 )
                                 .unwrap();
                         });
@@ -242,7 +253,7 @@ impl Monitor {
 
         if let BackendData::Wandb(data) = self.backend_data {
             Python::with_gil(|py| {
-                let wandb = py.import("python.wandb").unwrap();
+                let wandb = py.import("python.wandb_utils").unwrap();
                 wandb
                     .call_method1("finish_run", (data.run.as_ref().unwrap(),))
                     .unwrap();

@@ -3,6 +3,8 @@
 //! brush strokes.
 //! The environment stops once a difference threshold is reached, or after the time limit is hit.
 //! The difference at each time step is given as the reward.
+use std::collections::HashMap;
+
 use clap::Parser;
 use indicatif::ProgressIterator;
 
@@ -23,13 +25,13 @@ struct Args {
     #[arg(long, default_value_t = 10000)]
     steps: u32,
     /// Number of steps that comprise a single rollout.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 16)]
     rollout_steps: u32,
     /// Number of rollouts to run through before evaluating the model.
     #[arg(long, default_value_t = 100)]
     rollouts_before_eval: u32,
     /// Maximum number of steps to take in the environment before failure.
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 15)]
     max_env_steps: u32,
     /// Reward given if the maximum number of steps is reached. Should be negative.
     #[arg(long, default_value_t = 0.0, allow_hyphen_values(true))]
@@ -234,10 +236,20 @@ fn main() -> Result<(), anyhow::Error> {
     let mut p_opt = tch::nn::Adam::default().build(&p_net.vs, args.p_lr)?;
 
     // Plotting stuff
+    let mut config = HashMap::new();
+    let raw_args: Vec<_> = std::env::args().skip(1).collect();
+    for arg_index in 0..(raw_args.len() / 2) {
+        let arg = &raw_args[arg_index * 2];
+        if arg.starts_with("--") {
+            let value = &raw_args[arg_index * 2 + 1];
+            config.insert(arg.to_owned(), value.parse().unwrap());
+        }
+    }
     let mut monitor = Monitor::new(
         500,
         BackendParams::Wandb(WandbParams {
             project: "paint-rl".to_string(),
+            config,
         }),
     );
     let eval_reward_metric = monitor.add_metric("eval_reward");
