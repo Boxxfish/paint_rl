@@ -7,3 +7,6 @@
 /temp
 *.ptc
 *.pt
+
+# Config
+.env

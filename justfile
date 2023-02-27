@@ -1,8 +1,4 @@
-export LIBTORCH := "/home/ben/.cache/pypoetry/virtualenvs/paint-rl-models-v-oY54ye-py3.10/lib/python3.10/site-packages/torch"
-export LD_LIBRARY_PATH := "/home/ben/.cache/pypoetry/virtualenvs/paint-rl-models-v-oY54ye-py3.10/lib/python3.10/site-packages/torch/lib"
-export LIBTORCH_CXX11_ABI := "0"
-export PYO3_PYTHON := "python3.10"
-export RUST_BACKTRACE := "1"
+set dotenv-load := true
 
 default:
     just --list
