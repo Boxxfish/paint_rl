@@ -1,4 +1,5 @@
 pub mod algorithms;
+pub mod distributions;
 pub mod gym;
 pub mod model_utils;
 pub mod monitor;
