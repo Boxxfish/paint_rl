@@ -23,6 +23,30 @@ pub struct Categorical {
     _event_shape: Vec<i64>,
 }
 
+impl Categorical {
+    pub fn new(logits: tch::Tensor) -> Self {
+        let logits = &logits - &logits.logsumexp(&[-1], true);
+        let logits_size = logits.size();
+        let _num_events = *logits.size().last().unwrap();
+        let _batch_shape = if logits.dim() > 1 {
+            logits_size
+                .iter()
+                .copied()
+                .take(logits_size.len() - 1)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            probs: logits.softmax(-1, tch::Kind::Float),
+            logits,
+            _num_events,
+            _batch_shape,
+            _event_shape: Vec::new(),
+        }
+    }
+}
+
 impl Distribution for Categorical {
     fn sample(&self, sample_shape: &[i64]) -> tch::Tensor {
         let probs_2d = self.probs.reshape(&[-1, self._num_events]);
@@ -49,6 +73,21 @@ pub struct Normal {
     pub scale: tch::Tensor,
     _batch_shape: Vec<i64>,
     _event_shape: Vec<i64>,
+}
+
+impl Normal {
+    pub fn new(loc: tch::Tensor, scale: tch::Tensor) -> Self {
+        let loc_scale = tch::Tensor::broadcast_tensors(&[loc, scale]);
+        let loc = loc_scale[0].copy();
+        let scale = loc_scale[1].copy();
+        let batch_shape = loc.size();
+        Self {
+            loc,
+            scale,
+            _batch_shape: batch_shape.clone(),
+            _event_shape: batch_shape,
+        }
+    }
 }
 
 impl Distribution for Normal {
