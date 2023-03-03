@@ -39,3 +39,4 @@ tch = "0.10.1"
 anyhow = "1.0"
 ctrlc = "3.2"
 clap = {version = "4.0", features = ["derive"]}
+rsrl = "0.8.0"

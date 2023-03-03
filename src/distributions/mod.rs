@@ -3,7 +3,7 @@
 
 use tch::IndexOp;
 
-trait Distribution {
+pub trait Distribution {
     fn sample(&self, sample_shape: &[i64]) -> tch::Tensor;
     fn log_prob(&self, value: tch::Tensor) -> tch::Tensor;
 }
