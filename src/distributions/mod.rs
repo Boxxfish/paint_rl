@@ -84,8 +84,8 @@ impl Normal {
         Self {
             loc,
             scale,
-            _batch_shape: batch_shape.clone(),
-            _event_shape: batch_shape,
+            _batch_shape: batch_shape,
+            _event_shape: Vec::new(),
         }
     }
 }

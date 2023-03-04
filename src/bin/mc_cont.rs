@@ -1,4 +1,5 @@
-//! A setup for training an agent on the cartpole environment.
+//! A setup for training an agent on the continuous mountain car environment.
+//! Currently does not work.
 
 use clap::Parser;
 use indicatif::ProgressIterator;
@@ -11,6 +12,7 @@ use paint_gym::rollout_buffer::RolloutBuffer;
 
 use pyo3::prelude::*;
 use rsrl::domains::Domain;
+
 use tch::nn::OptimizerConfig;
 
 #[derive(Parser, Debug)]
@@ -108,10 +110,10 @@ pub fn results_to_state(
 /// Converts tensors to actions.
 pub fn tensor_to_actions(
     tensor: &tch::Tensor,
-) -> Vec<rsrl::domains::Action<rsrl::domains::CartPole>> {
+) -> Vec<rsrl::domains::Action<rsrl::domains::ContinuousMountainCar>> {
     let mut actions = Vec::new();
     for idx in 0..tensor.size2().unwrap().1 {
-        actions.push(tensor.get(0).int64_value(&[idx]) as usize);
+        actions.push(tensor.get(0).double_value(&[idx]));
     }
     actions
 }
@@ -129,6 +131,19 @@ fn copy_params(src: &tch::nn::VarStore, dest: &mut tch::nn::VarStore) {
     })
 }
 
+fn step_wrapper(
+    env: &mut rsrl::domains::ContinuousMountainCar,
+    action: rsrl::domains::Action<rsrl::domains::ContinuousMountainCar>,
+    should_fin: bool,
+) -> (rsrl::domains::Observation<Vec<f64>>, f64, bool) {
+    let output = env.step(&action);
+    let done = should_fin || matches!(&output.0, rsrl::domains::Observation::Terminal(_));
+    if done {
+        *env = rsrl::domains::ContinuousMountainCar::default();
+    }
+    (output.0, if should_fin { -1.0 } else { output.1 }, done)
+}
+
 fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
 
@@ -141,9 +156,9 @@ fn main() -> Result<(), anyhow::Error> {
     // Load models
     pyo3::prepare_freethreaded_python();
     cleanup_py();
-    let model_file = "cartpole_models";
-    let obs_dim = 4;
-    let act_dim = 2;
+    let model_file = "mc_cont_models";
+    let obs_dim = 2;
+    let act_dim = 1;
     let model_params = ModelParams { obs_dim, act_dim };
     Python::with_gil(|py| {
         prep_py(py);
@@ -190,42 +205,48 @@ fn main() -> Result<(), anyhow::Error> {
     let pred_value_metric = monitor.add_metric("pred_value");
     monitor.init();
 
-    let mut envs: Vec<rsrl::domains::CartPole> = (0..args.env_count)
-        .map(|_| rsrl::domains::CartPole::default())
+    let mut envs: Vec<rsrl::domains::ContinuousMountainCar> = (0..args.env_count)
+        .map(|_| rsrl::domains::ContinuousMountainCar::default())
         .collect();
-    let mut results: (Vec<_>, Vec<_>) = (
+    let mut results: (
+        Vec<rsrl::domains::Observation<rsrl::domains::State<rsrl::domains::ContinuousMountainCar>>>,
+        Vec<_>,
+        Vec<_>,
+    ) = (
         envs.iter().map(|e| e.emit()).collect(),
         (0..args.env_count).map(|_| 0.0).collect(),
+        (0..args.env_count).map(|_| false).collect(),
     );
     let mut rollout_buffer = RolloutBuffer::new(
         &[obs_dim],
         &[],
-        tch::Kind::Int,
+        tch::Kind::Float,
         args.env_count as usize,
         args.rollout_steps as usize,
         device,
     );
+    let mut action_scale = args.action_scale as f64;
     for step in (0..args.steps).progress() {
         monitor.add_step();
 
         let (obs, dones) = results_to_state(&results.0, device);
-        for (env, &done) in envs.iter_mut().zip(&dones) {
-            if done {
-                *env = rsrl::domains::CartPole::default();
-            }
-        }
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
-            let log_probs = p_net.module.forward_ts(&[&obs])?.to(device);
-            let actions = distributions::Categorical::new(log_probs).sample(&[1]);
+            let means = p_net.module.forward_ts(&[&obs])?.to(device);
+            let scales =
+                action_scale * tch::Tensor::ones(&means.size(), (tch::Kind::Float, device));
+            let actions = distributions::Normal::new(means, scales).sample(&[]);
             Ok(actions)
         })?;
         let actions = tensor_to_actions(&actions_tensor);
 
-        results = envs
+        let _results: Vec<_> = envs
             .iter_mut()
             .zip(&actions)
-            .map(|(e, action)| e.step(action))
-            .unzip();
+            .map(|(e, action)| step_wrapper(e, *action, step % args.max_env_steps == 0))
+            .collect();
+        results.0 = _results.iter().map(|r| r.0.to_owned()).collect();
+        results.1 = _results.iter().map(|r| r.1).collect();
+        results.2 = _results.iter().map(|r| r.2).collect();
         let rewards: Vec<_> = results.1.iter().map(|&x| x as f32).collect();
         rollout_buffer.insert_step(&obs, &actions_tensor.squeeze(), &rewards, &dones);
         monitor.log_metric(
@@ -255,13 +276,15 @@ fn main() -> Result<(), anyhow::Error> {
 
                 for (prev_states, _, actions, _, rewards_to_go, advantages, _) in &batches {
                     // Train policy network
-                    let old_log_probs = p_net_old.module.forward_ts(&[prev_states]).unwrap();
-                    let old_action_log_probs =
-                        distributions::Categorical::new(old_log_probs).log_prob(actions.copy());
+                    let old_means = p_net_old.module.forward_ts(&[prev_states]).unwrap();
+                    let scales = action_scale
+                        * tch::Tensor::ones(&old_means.size(), (tch::Kind::Float, device));
+                    let old_action_log_probs = distributions::Normal::new(old_means, scales.copy())
+                        .log_prob(actions.copy());
                     p_opt.zero_grad();
-                    let new_log_probs = p_net.module.forward_ts(&[prev_states]).unwrap();
+                    let new_means = p_net.module.forward_ts(&[prev_states]).unwrap();
                     let new_action_log_probs =
-                        distributions::Categorical::new(new_log_probs).log_prob(actions.copy());
+                        distributions::Normal::new(new_means, scales).log_prob(actions.copy());
                     let term1 = (&new_action_log_probs - &old_action_log_probs).exp() * advantages;
                     let term2: tch::Tensor = (1.0 + args.epsilon * advantages.sign()) * advantages;
                     let p_loss = -(term1.min_other(&term2).mean(tch::Kind::Float));
@@ -287,6 +310,7 @@ fn main() -> Result<(), anyhow::Error> {
             v_net.module.set_eval();
 
             rollout_buffer.clear();
+            action_scale -= args.action_scale as f64 / (args.steps / args.rollout_steps) as f64;
 
             // Eval after a certain number of rollouts
             if (step * args.rollout_steps) % args.rollouts_before_eval == 0 {
@@ -294,17 +318,23 @@ fn main() -> Result<(), anyhow::Error> {
                     // Evaluate the model's performance
                     let mut avg_reward = 0.0_f32;
                     let mut pred_value = 0.0;
-                    for _ in 0..args.max_env_steps {
-                        let obs = results_to_state(&results.0, device).0;
-                        let log_probs = p_net.module.forward_ts(&[&obs])?;
-                        let actions_tensor =
-                            distributions::Categorical::new(log_probs).sample(&[1]);
+                    for i in 0..args.max_env_steps {
+                        let (obs, _dones) = results_to_state(&results.0, device);
+                        let means = p_net.module.forward_ts(&[&obs])?;
+                        let scales = action_scale
+                            * tch::Tensor::ones(&means.size(), (tch::Kind::Float, device));
+                        let actions_tensor = distributions::Normal::new(means, scales).sample(&[]);
                         let actions = tensor_to_actions(&actions_tensor);
-                        results = envs
+                        let _results: Vec<_> = envs
                             .iter_mut()
                             .zip(&actions)
-                            .map(|(e, action)| e.step(action))
-                            .unzip();
+                            .map(|(e, action)| {
+                                step_wrapper(e, *action, i == args.max_env_steps - 1)
+                            })
+                            .collect();
+                        results.0 = _results.iter().map(|r| r.0.to_owned()).collect();
+                        results.1 = _results.iter().map(|r| r.1).collect();
+                        results.2 = _results.iter().map(|r| r.2).collect();
                         avg_reward += results.1.iter().copied().sum::<f64>() as f32;
                         pred_value += v_net
                             .module
