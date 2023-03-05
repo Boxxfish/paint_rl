@@ -79,32 +79,12 @@ struct ModelParams {
     act_dim: i64,
 }
 
-/// Converts results to tensor of states and dones.
-pub fn results_to_state(
-    results: &[rsrl::domains::Observation<Vec<f64>>],
-    device: tch::Device,
-) -> (tch::Tensor, Vec<bool>) {
-    let mut obs_vec = Vec::new();
-    let mut dones = Vec::new();
-    for obs in results.iter() {
-        let (obs, done) = match &obs {
-            rsrl::domains::Observation::Full(s) => (
-                tch::Tensor::of_slice(s).to_dtype(tch::Kind::Float, true, true),
-                false,
-            ),
-            rsrl::domains::Observation::Partial(s) => (
-                tch::Tensor::of_slice(s).to_dtype(tch::Kind::Float, true, true),
-                false,
-            ),
-            rsrl::domains::Observation::Terminal(s) => (
-                tch::Tensor::of_slice(s).to_dtype(tch::Kind::Float, true, true),
-                true,
-            ),
-        };
-        obs_vec.push(obs);
-        dones.push(done);
-    }
-    (tch::Tensor::stack(&obs_vec, 0).to(device), dones)
+/// Converts results to tensor of states.
+pub fn results_to_state(results: &[Vec<f64>], device: tch::Device) -> tch::Tensor {
+    let obs_vec: Vec<_> = results.iter().map(|r| tch::Tensor::of_slice(r)).collect();
+    tch::Tensor::stack(&obs_vec, 0)
+        .to_dtype(tch::Kind::Float, true, true)
+        .to(device)
 }
 
 /// Converts tensors to actions.
@@ -135,13 +115,17 @@ fn step_wrapper(
     env: &mut rsrl::domains::ContinuousMountainCar,
     action: rsrl::domains::Action<rsrl::domains::ContinuousMountainCar>,
     should_fin: bool,
-) -> (rsrl::domains::Observation<Vec<f64>>, f64, bool) {
-    let output = env.step(&action);
-    let done = should_fin || matches!(&output.0, rsrl::domains::Observation::Terminal(_));
+) -> (Vec<f64>, f64, bool) {
+    let t = env.transition(action);
+    let done = should_fin || t.terminated();
     if done {
         *env = rsrl::domains::ContinuousMountainCar::default();
     }
-    (output.0, if should_fin { -1.0 } else { output.1 }, done)
+    (
+        t.states().1.to_owned(),
+        if should_fin { -1.0 } else { t.reward },
+        done,
+    )
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -208,12 +192,8 @@ fn main() -> Result<(), anyhow::Error> {
     let mut envs: Vec<rsrl::domains::ContinuousMountainCar> = (0..args.env_count)
         .map(|_| rsrl::domains::ContinuousMountainCar::default())
         .collect();
-    let mut results: (
-        Vec<rsrl::domains::Observation<rsrl::domains::State<rsrl::domains::ContinuousMountainCar>>>,
-        Vec<_>,
-        Vec<_>,
-    ) = (
-        envs.iter().map(|e| e.emit()).collect(),
+    let mut results: (Vec<_>, Vec<_>, Vec<_>) = (
+        envs.iter().map(|e| e.emit().state().to_owned()).collect(),
         (0..args.env_count).map(|_| 0.0).collect(),
         (0..args.env_count).map(|_| false).collect(),
     );
@@ -229,7 +209,7 @@ fn main() -> Result<(), anyhow::Error> {
     for step in (0..args.steps).progress() {
         monitor.add_step();
 
-        let (obs, dones) = results_to_state(&results.0, device);
+        let obs = results_to_state(&results.0, device);
         let actions_tensor = tch::no_grad(|| -> Result<tch::Tensor, anyhow::Error> {
             let means = p_net.module.forward_ts(&[&obs])?.to(device);
             let scales =
@@ -244,19 +224,19 @@ fn main() -> Result<(), anyhow::Error> {
             .zip(&actions)
             .map(|(e, action)| step_wrapper(e, *action, step % args.max_env_steps == 0))
             .collect();
-        results.0 = _results.iter().map(|r| r.0.to_owned()).collect();
-        results.1 = _results.iter().map(|r| r.1).collect();
-        results.2 = _results.iter().map(|r| r.2).collect();
-        let rewards: Vec<_> = results.1.iter().map(|&x| x as f32).collect();
+        let next_obs = _results.iter().map(|r| r.0.to_owned()).collect();
+        let rewards: Vec<_> = _results.iter().map(|r| r.1 as f32).collect();
+        let dones: Vec<_> = _results.iter().map(|r| r.2).collect();
         rollout_buffer.insert_step(&obs, &actions_tensor.squeeze(), &rewards, &dones);
         monitor.log_metric(
             avg_reward_metric,
-            rewards.iter().sum::<f32>() / args.env_count as f32,
+            rewards.iter().copied().sum::<f32>() / args.env_count as f32,
         );
+        results = (next_obs, rewards, dones);
 
         if step % args.rollout_steps == 0 {
             // Add final observation
-            rollout_buffer.insert_final_step(&results_to_state(&results.0, device).0);
+            rollout_buffer.insert_final_step(&results_to_state(&results.0, device));
 
             // Train networks
             p_net.module.set_train();
@@ -319,7 +299,7 @@ fn main() -> Result<(), anyhow::Error> {
                     let mut avg_reward = 0.0_f32;
                     let mut pred_value = 0.0;
                     for i in 0..args.max_env_steps {
-                        let (obs, _dones) = results_to_state(&results.0, device);
+                        let obs = results_to_state(&results.0, device);
                         let means = p_net.module.forward_ts(&[&obs])?;
                         let scales = action_scale
                             * tch::Tensor::ones(&means.size(), (tch::Kind::Float, device));
@@ -332,16 +312,17 @@ fn main() -> Result<(), anyhow::Error> {
                                 step_wrapper(e, *action, i == args.max_env_steps - 1)
                             })
                             .collect();
-                        results.0 = _results.iter().map(|r| r.0.to_owned()).collect();
-                        results.1 = _results.iter().map(|r| r.1).collect();
-                        results.2 = _results.iter().map(|r| r.2).collect();
-                        avg_reward += results.1.iter().copied().sum::<f64>() as f32;
+                        let next_obs = _results.iter().map(|r| r.0.to_owned()).collect();
+                        let rewards = _results.iter().map(|r| r.1 as f32).collect();
+                        let dones = _results.iter().map(|r| r.2).collect();
+                        avg_reward += results.1.iter().copied().sum::<f32>();
                         pred_value += v_net
                             .module
                             .forward_ts(&[&obs])
                             .unwrap()
                             .sum(tch::Kind::Float)
                             .double_value(&[]) as f32;
+                        results = (next_obs, rewards, dones);
                     }
                     monitor.log_metric(
                         eval_reward_metric,
