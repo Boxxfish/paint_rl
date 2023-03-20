@@ -246,7 +246,7 @@ fn main() -> Result<(), anyhow::Error> {
         }
     }
     let mut monitor = Monitor::new(
-        500,
+        100,
         BackendParams::Wandb(WandbParams {
             project: "paint-rl".to_string(),
             config,

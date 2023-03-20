@@ -5,11 +5,9 @@ Models for copy stroke environment.
 import torch
 
 from python.model_utils import get_img_size, init_orthogonal
-
 class VNet(torch.nn.Module):
     def __init__(self, img_size: int):
         super(VNet, self).__init__()
-
         self.cnn1 = torch.nn.Conv2d(6, 8, 2, 1)
         cnn1_img_size = get_img_size(img_size, self.cnn1)
         self.cnn1_norm = torch.nn.BatchNorm2d(self.cnn1.out_channels)
@@ -37,8 +35,12 @@ class VNet(torch.nn.Module):
 class PNet(torch.nn.Module):
     def __init__(self, img_size: int, action_dim: int):
         super(PNet, self).__init__()
+        
+        width_pos = torch.arange(0, img_size).repeat(img_size, 1).T
+        height_pos = torch.arange(0, img_size).repeat(img_size, 1)
+        self.pos = torch.stack([width_pos, height_pos])
         self.action_dim = action_dim
-        self.cnn1 = torch.nn.Conv2d(6, 8, 2, 1)
+        self.cnn1 = torch.nn.Conv2d(6 + 2, 8, 2, 1)
         cnn1_img_size = get_img_size(img_size, self.cnn1)
         self.cnn1_norm = torch.nn.BatchNorm2d(self.cnn1.out_channels)
         self.cnn2 = torch.nn.Conv2d(self.cnn1.out_channels, 16, 2, 1)
@@ -52,6 +54,9 @@ class PNet(torch.nn.Module):
         init_orthogonal(self)
 
     def forward(self, states: torch.Tensor) -> torch.Tensor:
+        batch_size = states.shape[0]
+        positional = self.pos.repeat((batch_size, 1, 1, 1))
+        states = torch.concat([states, positional], 1)
         x = self.cnn1(states)
         x = self.cnn1_norm(x)
         x = self.relu(x)
